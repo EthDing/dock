@@ -1,0 +1,35 @@
+{
+  "name": "dock",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "dock": "dist/cli.js"
+  },
+  "dependencies": {
+    "@dock/tui": "workspace:*",
+    "zod": "4.4.3"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "packageManager": "pnpm@10.34.5",
+  "scripts": {
+    "build": "pnpm --filter @dock/tui build && tsc -p tsconfig.build.json",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm --filter @dock/tui typecheck",
+    "ci": "pnpm check && pnpm test && pnpm build",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "test": "vitest run && pnpm --filter @dock/tui test",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.10",
+    "@types/node": "24.13.3",
+    "tsx": "4.23.12",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  }
+}
