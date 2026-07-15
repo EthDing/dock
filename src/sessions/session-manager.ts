@@ -1,5 +1,7 @@
 import { readdir } from 'node:fs/promises'
-import type { TextBlock, UserMessage } from '../model/types.js'
+import type { UserTranscriptMessage } from '../messages/create-message.js'
+import type { TextBlock } from '../model/types.js'
+import { asSessionId, type SessionId } from './ids.js'
 import {
   getProjectSessionsDirectory,
   loadSession,
@@ -14,7 +16,7 @@ type SessionLocation = {
 }
 
 export type SessionSummary = {
-  sessionId: string
+  sessionId: SessionId
   createdAt: string
   updatedAt: string
   firstPrompt?: string
@@ -35,15 +37,18 @@ export async function listSessions(location: SessionLocation): Promise<SessionSu
     names
       .filter((name) => name.endsWith('.jsonl'))
       .map(async (name) => {
-        const sessionId = name.slice(0, -'.jsonl'.length)
+        const sessionId = asSessionId(name.slice(0, -'.jsonl'.length))
         const loaded = await loadSession({ ...location, sessionId })
         const lastMessage = [...loaded.records]
           .reverse()
-          .find((record): record is SessionMessageRecord => record.type === 'message')
+          .find(
+            (record): record is SessionMessageRecord =>
+              record.type === 'user' || record.type === 'assistant',
+          )
         const firstUserMessage = loaded.messages.find(
-          (message): message is UserMessage => message.role === 'user',
+          (message): message is UserTranscriptMessage => message.type === 'user',
         )
-        const firstText = firstUserMessage?.content.find(
+        const firstText = firstUserMessage?.message.content.find(
           (block): block is TextBlock => block.type === 'text',
         )?.text
 
@@ -68,8 +73,8 @@ export async function findMostRecentSession(
 
 export async function forkSession(
   options: SessionLocation & {
-    sourceSessionId: string
-    targetSessionId: string
+    sourceSessionId: SessionId
+    targetSessionId: SessionId
     name?: string
     now?: () => Date
   },
@@ -89,9 +94,7 @@ export async function forkSession(
   })
 
   try {
-    for (const record of source.records) {
-      if (record.type === 'message') await writer.appendMessage(record.message, record.id)
-    }
+    await writer.recordTranscript(source.messages)
   } finally {
     await writer.close()
   }

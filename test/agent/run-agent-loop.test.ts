@@ -4,6 +4,7 @@ import {
   type AgentEvent,
   type AgentLoopResult,
 } from '../../src/agent/run-agent-loop.js'
+import { createUserMessage } from '../../src/messages/create-message.js'
 import { FakeModelAdapter } from '../../src/model/fake-model.js'
 import type { ModelStreamEvent } from '../../src/model/types.js'
 
@@ -34,7 +35,7 @@ describe('runAgentLoop', () => {
 
     const { result } = await drain(
       runAgentLoop({
-        messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'hello' }] })],
         model,
         modelId: 'test-model',
         systemPrompt: ['You are Dock.'],
@@ -43,12 +44,15 @@ describe('runAgentLoop', () => {
     )
 
     expect(result.reason).toBe('completed')
-    expect(result.messages.at(-1)).toEqual({
-      role: 'assistant',
-      content: [{ type: 'text', text: 'done' }],
-      id: 'assistant-1',
-      stopReason: 'end_turn',
-      usage: { outputTokens: 1 },
+    expect(result.messages.at(-1)).toMatchObject({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'done' }],
+        id: 'assistant-1',
+        stopReason: 'end_turn',
+        usage: { outputTokens: 1 },
+      },
     })
     expect(model.requests).toHaveLength(1)
   })
@@ -76,7 +80,7 @@ describe('runAgentLoop', () => {
 
     const { result } = await drain(
       runAgentLoop({
-        messages: [{ role: 'user', content: [{ type: 'text', text: 'read it' }] }],
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'read it' }] })],
         model,
         modelId: 'test-model',
         systemPrompt: [],
@@ -142,7 +146,7 @@ describe('runAgentLoop', () => {
 
     await drain(
       runAgentLoop({
-        messages: [{ role: 'user', content: [{ type: 'text', text: 'read both' }] }],
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'read both' }] })],
         model,
         modelId: 'test-model',
         systemPrompt: [],
@@ -189,7 +193,7 @@ describe('runAgentLoop', () => {
 
     const { result } = await drain(
       runAgentLoop({
-        messages: [{ role: 'user', content: [{ type: 'text', text: 'read' }] }],
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'read' }] })],
         model,
         modelId: 'test-model',
         systemPrompt: [],
@@ -220,7 +224,7 @@ describe('runAgentLoop', () => {
     const { result } = await drain(
       runAgentLoop({
         maxTurns: 0,
-        messages: [{ role: 'user', content: [{ type: 'text', text: 'read' }] }],
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'read' }] })],
         model,
         modelId: 'test-model',
         systemPrompt: [],
@@ -250,7 +254,7 @@ describe('runAgentLoop', () => {
 
     const { result } = await drain(
       runAgentLoop({
-        messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'hello' }] })],
         model,
         modelId: 'test-model',
         signal: controller.signal,

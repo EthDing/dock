@@ -3,7 +3,6 @@ import type {
   JsonObject,
   JsonSchema,
   ModelAdapter,
-  ModelMessage,
   ModelRequest,
   ModelStreamEvent,
   StopReason,
@@ -11,6 +10,12 @@ import type {
   ToolUseBlock,
   Usage,
 } from '../model/types.js'
+import {
+  createAssistantMessage,
+  createUserMessage,
+  type AssistantTranscriptMessage,
+  type TranscriptMessage,
+} from '../messages/create-message.js'
 
 export type AgentToolResult = {
   content: string
@@ -29,7 +34,7 @@ export type AgentLoopOptions = {
   model: ModelAdapter
   modelId: string
   systemPrompt: readonly string[]
-  messages: readonly ModelMessage[]
+  messages: readonly TranscriptMessage[]
   tools: readonly AgentTool[]
   signal?: AbortSignal
   maxTurns?: number
@@ -37,13 +42,13 @@ export type AgentLoopOptions = {
 
 export type AgentEvent =
   | { type: 'model_stream'; event: ModelStreamEvent }
-  | { type: 'assistant_message'; message: AssistantMessage }
+  | { type: 'assistant_message'; message: AssistantTranscriptMessage }
   | { type: 'tool_execution_start'; toolUse: ToolUseBlock }
   | { type: 'tool_result'; result: ToolResultBlock }
 
 export type AgentLoopResult = {
   reason: 'aborted' | 'completed' | 'max_turns' | 'model_error'
-  messages: readonly ModelMessage[]
+  messages: readonly TranscriptMessage[]
   error?: string
 }
 
@@ -61,13 +66,13 @@ export async function* runAgentLoop(
   externalSignal?.addEventListener('abort', abort, { once: true })
   if (externalSignal?.aborted) abort()
 
-  const messages: ModelMessage[] = [...options.messages]
+  const messages: TranscriptMessage[] = [...options.messages]
   let toolTurns = 0
 
   try {
     while (!controller.signal.aborted) {
       const request: ModelRequest = {
-        messages: [...messages],
+        messages: messages.map((message) => message.message),
         modelId: options.modelId,
         systemPrompt: options.systemPrompt,
         tools: options.tools.map(({ description, inputSchema, name }) => ({
@@ -171,13 +176,14 @@ export async function* runAgentLoop(
         }
       }
 
-      const assistantMessage: AssistantMessage = {
+      const assistantApiMessage: AssistantMessage = {
         content,
         id: messageId,
         role: 'assistant',
         stopReason,
         usage,
       }
+      const assistantMessage = createAssistantMessage(assistantApiMessage)
       messages.push(assistantMessage)
       yield { type: 'assistant_message', message: assistantMessage }
 
@@ -217,7 +223,7 @@ export async function* runAgentLoop(
         }
       }
 
-      messages.push({ content: toolResults, role: 'user' })
+      messages.push(createUserMessage({ content: toolResults }))
     }
 
     return { messages, reason: 'aborted' }

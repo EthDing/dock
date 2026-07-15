@@ -1,24 +1,23 @@
-import { createHash } from 'node:crypto'
+import { createHash, type UUID } from 'node:crypto'
 import { mkdir, open, readFile, unlink, type FileHandle } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import type { ModelMessage } from '../model/types.js'
+import type { TranscriptMessage } from '../messages/create-message.js'
+import { asSessionId, isUuid, type SessionId } from './ids.js'
 
 export type SessionMetadataRecord = {
   type: 'session_start'
   version: 1
-  sessionId: string
+  sessionId: SessionId
   cwd: string
   createdAt: string
-  forkedFromSessionId?: string
+  forkedFromSessionId?: SessionId
   name?: string
 }
 
-export type SessionMessageRecord = {
-  type: 'message'
-  id: string
-  parentId: string | null
-  timestamp: string
-  message: ModelMessage
+export type SessionMessageRecord = TranscriptMessage & {
+  parentUuid: UUID | null
+  sessionId: SessionId
+  cwd: string
 }
 
 export type SessionNameRecord = {
@@ -30,7 +29,7 @@ export type SessionNameRecord = {
 export type SessionRecord = SessionMetadataRecord | SessionMessageRecord | SessionNameRecord
 
 export type LoadedSession = {
-  messages: readonly ModelMessage[]
+  messages: readonly TranscriptMessage[]
   metadata: SessionMetadataRecord
   name?: string
   records: readonly SessionRecord[]
@@ -40,11 +39,11 @@ export type LoadedSession = {
 type SessionLocation = {
   configDir: string
   cwd: string
-  sessionId: string
+  sessionId: SessionId
 }
 
 type WriterOptions = SessionLocation & {
-  forkedFromSessionId?: string
+  forkedFromSessionId?: SessionId
   name?: string
   now?: () => Date
 }
@@ -54,25 +53,33 @@ export class SessionWriter {
   readonly #lock: FileHandle
   readonly #lockPath: string
   readonly #now: () => Date
+  readonly #cwd: string
+  readonly #sessionId: SessionId
+  readonly #messageUuids: Set<UUID>
   #closed = false
-  #headId: string | null
+  #headUuid: UUID | null
 
   private constructor(options: {
     file: FileHandle
-    headId: string | null
+    cwd: string
+    headUuid: UUID | null
     lock: FileHandle
     lockPath: string
+    messageUuids: Set<UUID>
     now: () => Date
+    sessionId: SessionId
   }) {
     this.#file = options.file
-    this.#headId = options.headId
+    this.#cwd = options.cwd
+    this.#headUuid = options.headUuid
     this.#lock = options.lock
     this.#lockPath = options.lockPath
+    this.#messageUuids = options.messageUuids
     this.#now = options.now
+    this.#sessionId = options.sessionId
   }
 
   static async create(options: WriterOptions): Promise<SessionWriter> {
-    validateSessionId(options.sessionId)
     const sessionPath = getSessionPath(options)
     await mkdir(getProjectSessionsDirectory(options), { recursive: true, mode: 0o700 })
     const { handle: lock, path: lockPath } = await acquireLock(sessionPath)
@@ -93,32 +100,15 @@ export class SessionWriter {
         version: 1,
       }
       await appendAndSync(file, metadata)
-      return new SessionWriter({ file, headId: null, lock, lockPath, now })
-    } catch (error) {
-      await file?.close()
-      await releaseLock(lock, lockPath)
-      throw error
-    }
-  }
-
-  static async open(options: WriterOptions): Promise<SessionWriter> {
-    validateSessionId(options.sessionId)
-    const sessionPath = getSessionPath(options)
-    const { handle: lock, path: lockPath } = await acquireLock(sessionPath)
-
-    let file: FileHandle | undefined
-    try {
-      const loaded = await loadSession(options)
-      const headId = [...loaded.records]
-        .reverse()
-        .find((record): record is SessionMessageRecord => record.type === 'message')?.id
-      file = await open(sessionPath, 'a', 0o600)
       return new SessionWriter({
+        cwd: metadata.cwd,
         file,
-        headId: headId ?? null,
+        headUuid: null,
         lock,
         lockPath,
-        now: options.now ?? (() => new Date()),
+        messageUuids: new Set(),
+        now,
+        sessionId: options.sessionId,
       })
     } catch (error) {
       await file?.close()
@@ -127,18 +117,50 @@ export class SessionWriter {
     }
   }
 
-  async appendMessage(message: ModelMessage, id: string): Promise<void> {
-    this.#assertOpen()
-    if (!id) throw new Error('Session message id must not be empty')
-    const record: SessionMessageRecord = {
-      id,
-      message,
-      parentId: this.#headId,
-      timestamp: this.#now().toISOString(),
-      type: 'message',
+  static async open(options: WriterOptions): Promise<SessionWriter> {
+    const sessionPath = getSessionPath(options)
+    const { handle: lock, path: lockPath } = await acquireLock(sessionPath)
+
+    let file: FileHandle | undefined
+    try {
+      const loaded = await loadSession(options)
+      const headUuid = [...loaded.records].reverse().find(isSessionMessageRecord)?.uuid
+      file = await open(sessionPath, 'a', 0o600)
+      return new SessionWriter({
+        cwd: loaded.metadata.cwd,
+        file,
+        headUuid: headUuid ?? null,
+        lock,
+        lockPath,
+        messageUuids: new Set(loaded.messages.map((message) => message.uuid)),
+        now: options.now ?? (() => new Date()),
+        sessionId: options.sessionId,
+      })
+    } catch (error) {
+      await file?.close()
+      await releaseLock(lock, lockPath)
+      throw error
     }
-    await appendAndSync(this.#file, record)
-    this.#headId = id
+  }
+
+  async recordTranscript(messages: readonly TranscriptMessage[]): Promise<UUID | null> {
+    this.#assertOpen()
+    for (const message of messages) {
+      if (this.#messageUuids.has(message.uuid)) {
+        this.#headUuid = message.uuid
+        continue
+      }
+      const record: SessionMessageRecord = {
+        parentUuid: this.#headUuid,
+        ...message,
+        cwd: this.#cwd,
+        sessionId: this.#sessionId,
+      }
+      await appendAndSync(this.#file, record)
+      this.#messageUuids.add(message.uuid)
+      this.#headUuid = message.uuid
+    }
+    return this.#headUuid
   }
 
   async rename(name: string): Promise<void> {
@@ -165,7 +187,6 @@ export class SessionWriter {
 }
 
 export async function loadSession(location: SessionLocation): Promise<LoadedSession> {
-  validateSessionId(location.sessionId)
   const sessionPath = getSessionPath(location)
   const contents = await readFile(sessionPath, 'utf8')
   const hasCompleteFinalLine = contents.endsWith('\n')
@@ -197,8 +218,8 @@ export async function loadSession(location: SessionLocation): Promise<LoadedSess
 
   return {
     messages: records
-      .filter((record): record is SessionMessageRecord => record.type === 'message')
-      .map((record) => record.message),
+      .filter(isSessionMessageRecord)
+      .map(({ parentUuid: _parentUuid, sessionId: _sessionId, cwd: _cwd, ...message }) => message),
     metadata,
     ...(() => {
       const renamed = [...records]
@@ -213,7 +234,6 @@ export async function loadSession(location: SessionLocation): Promise<LoadedSess
 }
 
 export function getSessionPath(location: SessionLocation): string {
-  validateSessionId(location.sessionId)
   return join(getProjectSessionsDirectory(location), `${location.sessionId}.jsonl`)
 }
 
@@ -277,14 +297,25 @@ function parseSessionRecord(value: unknown, path: string, line: number): Session
     ) {
       throw new Error(`Invalid session_start record at ${path}:${line}`)
     }
-    return value as SessionMetadataRecord
+    return {
+      ...(value as Omit<SessionMetadataRecord, 'forkedFromSessionId' | 'sessionId'>),
+      ...(typeof value.forkedFromSessionId === 'string'
+        ? { forkedFromSessionId: asSessionId(value.forkedFromSessionId) }
+        : {}),
+      sessionId: asSessionId(value.sessionId),
+    }
   }
-  if (value.type === 'message') {
+  if (value.type === 'user' || value.type === 'assistant') {
     if (
-      typeof value.id !== 'string' ||
-      (value.parentId !== null && typeof value.parentId !== 'string') ||
+      typeof value.uuid !== 'string' ||
+      !isUuid(value.uuid) ||
+      (value.parentUuid !== null &&
+        (typeof value.parentUuid !== 'string' || !isUuid(value.parentUuid))) ||
       typeof value.timestamp !== 'string' ||
-      !isObject(value.message)
+      !isObject(value.message) ||
+      typeof value.sessionId !== 'string' ||
+      !isUuid(value.sessionId) ||
+      typeof value.cwd !== 'string'
     ) {
       throw new Error(`Invalid message record at ${path}:${line}`)
     }
@@ -303,10 +334,8 @@ function parseSessionRecord(value: unknown, path: string, line: number): Session
   throw new Error(`Unknown session record type ${value.type} at ${path}:${line}`)
 }
 
-function validateSessionId(sessionId: string): void {
-  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(sessionId)) {
-    throw new Error(`Invalid session id: ${sessionId}`)
-  }
+function isSessionMessageRecord(record: SessionRecord): record is SessionMessageRecord {
+  return record.type === 'user' || record.type === 'assistant'
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
