@@ -1,7 +1,7 @@
+import type { UUID } from 'node:crypto'
 import type {
   AssistantMessage,
   JsonObject,
-  JsonSchema,
   ModelAdapter,
   ModelRequest,
   ModelStreamEvent,
@@ -16,19 +16,7 @@ import {
   type AssistantTranscriptMessage,
   type TranscriptMessage,
 } from '../messages/create-message.js'
-
-export type AgentToolResult = {
-  content: string
-  isError?: boolean
-}
-
-export type AgentTool = {
-  name: string
-  description: string
-  inputSchema: JsonSchema
-  isConcurrencySafe: (input: JsonObject) => boolean
-  execute: (input: JsonObject, options: { signal: AbortSignal }) => Promise<AgentToolResult>
-}
+import type { AgentTool, AgentToolResult } from '../tools/types.js'
 
 export type AgentLoopOptions = {
   model: ModelAdapter
@@ -208,13 +196,15 @@ export async function* runAgentLoop(
         if (batch.isConcurrencySafe) {
           batchResults = await Promise.all(
             batch.toolUses.map((toolUse) =>
-              executeToolUse(toolUse, options.tools, controller.signal),
+              executeToolUse(toolUse, options.tools, controller.signal, assistantMessage.uuid),
             ),
           )
         } else {
           const toolUse = batch.toolUses[0]
           if (!toolUse) throw new Error('Non-concurrent tool batch must contain one tool')
-          batchResults = [await executeToolUse(toolUse, options.tools, controller.signal)]
+          batchResults = [
+            await executeToolUse(toolUse, options.tools, controller.signal, assistantMessage.uuid),
+          ]
         }
 
         for (const result of batchResults) {
@@ -286,6 +276,7 @@ async function executeToolUse(
   toolUse: ToolUseBlock,
   tools: readonly AgentTool[],
   signal: AbortSignal,
+  parentMessageUuid: UUID,
 ): Promise<ToolResultBlock> {
   const tool = tools.find((candidate) => candidate.name === toolUse.name)
   let result: AgentToolResult
@@ -294,7 +285,7 @@ async function executeToolUse(
     result = { content: `Unknown tool: ${toolUse.name}`, isError: true }
   } else {
     try {
-      result = await tool.execute(toolUse.input, { signal })
+      result = await tool.execute(toolUse.input, { parentMessageUuid, signal })
     } catch (error) {
       result = {
         content: error instanceof Error ? error.message : String(error),

@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@dock/tui": "workspace:*",
+    "fast-glob": "3.3.3",
     "zod": "4.4.3"
   },
   "engines": {
