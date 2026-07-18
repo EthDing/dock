@@ -110,6 +110,64 @@ describe('runAgentLoop', () => {
     })
   })
 
+  it('feeds a denied tool result back without executing the tool', async () => {
+    const model = new FakeModelAdapter([
+      [
+        { type: 'message_start', messageId: 'assistant-denied-tool' },
+        {
+          type: 'content_block_start',
+          index: 0,
+          block: { type: 'tool_use', id: 'tool-denied', name: 'Write' },
+        },
+        {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'input_json_delta', partialJson: '{"file_path":"/tmp/a"}' },
+        },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_delta', stopReason: 'tool_use', usage: {} },
+        { type: 'message_stop' },
+      ],
+      textResponse('understood'),
+    ])
+    let executions = 0
+
+    await drain(
+      runAgentLoop({
+        canUseTool: async () => ({ behavior: 'deny', message: 'Permission denied' }),
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'write' }] })],
+        model,
+        modelId: 'test-model',
+        systemPrompt: [],
+        tools: [
+          {
+            description: 'Write a file',
+            execute: async () => {
+              executions += 1
+              return { content: 'unexpected' }
+            },
+            inputSchema: { type: 'object' },
+            isConcurrencySafe: () => false,
+            name: 'Write',
+          },
+        ],
+      }),
+    )
+
+    expect(executions).toBe(0)
+    expect(model.requests[1]?.messages.at(-1)).toMatchObject({
+      role: 'user',
+      content: [
+        {
+          content: 'Permission denied',
+          isError: true,
+          toolUseId: 'tool-denied',
+          type: 'tool_result',
+        },
+      ],
+    })
+  })
+
   it('runs consecutive concurrency-safe tools in parallel', async () => {
     const model = new FakeModelAdapter([
       [

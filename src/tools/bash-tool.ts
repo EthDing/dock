@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { resolve } from 'node:path'
 import { z } from 'zod'
+import { matchesCommandSpecifier } from '../permissions/specifier-matching.js'
 import type { AgentTool } from './types.js'
 
 const MAX_TIMEOUT_MS = 600_000
@@ -13,7 +14,7 @@ const inputSchema = z.strictObject({
   timeout: z.number().int().positive().max(MAX_TIMEOUT_MS).optional(),
 })
 
-export function createBashTool(options: { cwd: string }): AgentTool {
+export function createBashTool(options: { cwd: string; homeDir?: string }): AgentTool {
   const cwd = resolve(options.cwd)
   return {
     description: 'Executes a shell command in the project environment.',
@@ -41,6 +42,18 @@ export function createBashTool(options: { cwd: string }): AgentTool {
       },
       required: ['command'],
       type: 'object',
+    },
+    getPermissionSubject: (input) => {
+      const command = typeof input.command === 'string' ? input.command : ''
+      return {
+        isReadOnly: isReadOnlyBashCommand(command),
+        matchesSpecifier: (pattern) => matchesCommandSpecifier(pattern, command),
+        name: 'Bash',
+        requiresBypassConfirmation: requiresBypassConfirmation(
+          command,
+          options.homeDir ?? process.env.HOME ?? '',
+        ),
+      }
     },
     isConcurrencySafe: (input) =>
       typeof input.command === 'string' && isReadOnlyBashCommand(input.command),

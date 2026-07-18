@@ -16,9 +16,10 @@ import {
   type AssistantTranscriptMessage,
   type TranscriptMessage,
 } from '../messages/create-message.js'
-import type { AgentTool, AgentToolResult } from '../tools/types.js'
+import type { AgentTool, AgentToolResult, CanUseTool } from '../tools/types.js'
 
 export type AgentLoopOptions = {
+  canUseTool?: CanUseTool
   model: ModelAdapter
   modelId: string
   systemPrompt: readonly string[]
@@ -196,14 +197,26 @@ export async function* runAgentLoop(
         if (batch.isConcurrencySafe) {
           batchResults = await Promise.all(
             batch.toolUses.map((toolUse) =>
-              executeToolUse(toolUse, options.tools, controller.signal, assistantMessage.uuid),
+              executeToolUse(
+                toolUse,
+                options.tools,
+                controller.signal,
+                assistantMessage.uuid,
+                options.canUseTool,
+              ),
             ),
           )
         } else {
           const toolUse = batch.toolUses[0]
           if (!toolUse) throw new Error('Non-concurrent tool batch must contain one tool')
           batchResults = [
-            await executeToolUse(toolUse, options.tools, controller.signal, assistantMessage.uuid),
+            await executeToolUse(
+              toolUse,
+              options.tools,
+              controller.signal,
+              assistantMessage.uuid,
+              options.canUseTool,
+            ),
           ]
         }
 
@@ -277,6 +290,7 @@ async function executeToolUse(
   tools: readonly AgentTool[],
   signal: AbortSignal,
   parentMessageUuid: UUID,
+  canUseTool?: CanUseTool,
 ): Promise<ToolResultBlock> {
   const tool = tools.find((candidate) => candidate.name === toolUse.name)
   let result: AgentToolResult
@@ -284,6 +298,18 @@ async function executeToolUse(
   if (!tool) {
     result = { content: `Unknown tool: ${toolUse.name}`, isError: true }
   } else {
+    const decision = await canUseTool?.(tool, toolUse.input, {
+      parentMessageUuid,
+      toolUseId: toolUse.id,
+    })
+    if (decision?.behavior === 'deny') {
+      return {
+        content: decision.message,
+        isError: true,
+        toolUseId: toolUse.id,
+        type: 'tool_result',
+      }
+    }
     try {
       result = await tool.execute(toolUse.input, { parentMessageUuid, signal })
     } catch (error) {

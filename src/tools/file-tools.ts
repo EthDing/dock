@@ -3,6 +3,7 @@ import { dirname, isAbsolute, resolve } from 'node:path'
 import { z } from 'zod'
 import type { FileHistory } from '../checkpoint/file-history.js'
 import type { JsonObject } from '../model/types.js'
+import { matchesPathSpecifier } from '../permissions/specifier-matching.js'
 import type { AgentTool } from './types.js'
 import type { FileReadState } from './file-read-state.js'
 
@@ -69,6 +70,14 @@ export function createReadTool(dependencies: FileToolDependencies): AgentTool {
       required: ['file_path'],
       type: 'object',
     },
+    getPermissionSubject: (input) => ({
+      isReadOnly: true,
+      matchesSpecifier: (pattern) =>
+        typeof input.file_path === 'string' &&
+        matchesPathSpecifier(pattern, input.file_path, dependencies.cwd),
+      name: 'Read',
+      requiresBypassConfirmation: false,
+    }),
     isConcurrencySafe: () => true,
     name: 'Read',
   }
@@ -99,6 +108,14 @@ export function createWriteTool(dependencies: FileToolDependencies): AgentTool {
       required: ['file_path', 'content'],
       type: 'object',
     },
+    getPermissionSubject: (input) => ({
+      isReadOnly: false,
+      matchesSpecifier: (pattern) =>
+        typeof input.file_path === 'string' &&
+        matchesPathSpecifier(pattern, input.file_path, dependencies.cwd),
+      name: 'Write',
+      requiresBypassConfirmation: false,
+    }),
     isConcurrencySafe: () => false,
     name: 'Write',
   }
@@ -155,6 +172,14 @@ export function createEditTool(dependencies: FileToolDependencies): AgentTool {
       required: ['file_path', 'old_string', 'new_string'],
       type: 'object',
     },
+    getPermissionSubject: (input) => ({
+      isReadOnly: false,
+      matchesSpecifier: (pattern) =>
+        typeof input.file_path === 'string' &&
+        matchesPathSpecifier(pattern, input.file_path, dependencies.cwd),
+      name: 'Edit',
+      requiresBypassConfirmation: false,
+    }),
     isConcurrencySafe: () => false,
     name: 'Edit',
   }

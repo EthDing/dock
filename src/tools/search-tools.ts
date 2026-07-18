@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 import fg from 'fast-glob'
 import { z } from 'zod'
+import { matchesWildcard } from '../permissions/specifier-matching.js'
 import type { AgentTool } from './types.js'
 
 const VCS_IGNORES = [
@@ -71,6 +72,13 @@ export function createGlobTool(options: { cwd: string }): AgentTool {
       required: ['pattern'],
       type: 'object',
     },
+    getPermissionSubject: (input) => ({
+      isReadOnly: true,
+      matchesSpecifier: (pattern) =>
+        typeof input.pattern === 'string' && matchesWildcard(pattern, input.pattern),
+      name: 'Glob',
+      requiresBypassConfirmation: false,
+    }),
     isConcurrencySafe: () => true,
     name: 'Glob',
   }
@@ -135,6 +143,13 @@ export function createGrepTool(options: { cwd: string }): AgentTool {
       required: ['pattern'],
       type: 'object',
     },
+    getPermissionSubject: (input) => ({
+      isReadOnly: true,
+      matchesSpecifier: (pattern) =>
+        typeof input.pattern === 'string' && matchesWildcard(pattern, input.pattern),
+      name: 'Grep',
+      requiresBypassConfirmation: false,
+    }),
     isConcurrencySafe: () => true,
     name: 'Grep',
   }
