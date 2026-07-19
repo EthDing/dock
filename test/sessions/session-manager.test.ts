@@ -1,7 +1,8 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { FileHistory } from '../../src/checkpoint/file-history.js'
 import { createUserMessage } from '../../src/messages/create-message.js'
 import {
   findMostRecentSession,
@@ -81,5 +82,42 @@ describe('session manager', () => {
         message: { role: 'user', content: [{ type: 'text', text: 'keep this' }] },
       },
     ])
+  })
+
+  it('copies checkpoint records and backup files when forking', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dock-session-fork-history-'))
+    const configDir = join(root, 'config')
+    const cwd = join(root, 'project')
+    await mkdir(cwd, { recursive: true })
+    const filePath = join(cwd, 'file.txt')
+    await writeFile(filePath, 'before')
+    const source = await SessionWriter.create({ configDir, cwd, sessionId: SOURCE_SESSION })
+    const history = new FileHistory({
+      configDir,
+      cwd,
+      onSnapshot: (snapshot, isUpdate) => source.recordFileHistorySnapshot(snapshot, isUpdate),
+      sessionId: SOURCE_SESSION,
+    })
+    const checkpointId = asMessageUuid('40000000-0000-4000-8000-000000000004')
+    await history.makeSnapshot(checkpointId)
+    await history.trackEdit(filePath, checkpointId)
+    await writeFile(filePath, 'after')
+    await source.close()
+
+    const fork = await forkSession({
+      configDir,
+      cwd,
+      sourceSessionId: SOURCE_SESSION,
+      targetSessionId: FORK_SESSION,
+    })
+    const forkHistory = new FileHistory({
+      configDir,
+      cwd,
+      sessionId: FORK_SESSION,
+      snapshots: fork.fileHistorySnapshots,
+    })
+    await forkHistory.rewind(checkpointId)
+
+    expect(await readFile(filePath, 'utf8')).toBe('before')
   })
 })

@@ -1,4 +1,5 @@
-import { readdir } from 'node:fs/promises'
+import { copyFile, link, mkdir, readdir } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { UserTranscriptMessage } from '../messages/create-message.js'
 import type { TextBlock } from '../model/types.js'
 import { asSessionId, type SessionId } from './ids.js'
@@ -95,6 +96,14 @@ export async function forkSession(
 
   try {
     await writer.recordTranscript(source.messages)
+    await copyFileHistoryBackups(
+      options.configDir,
+      options.sourceSessionId,
+      options.targetSessionId,
+    )
+    for (const snapshot of source.fileHistorySnapshots) {
+      await writer.recordFileHistorySnapshot(snapshot, false)
+    }
   } finally {
     await writer.close()
   }
@@ -108,4 +117,33 @@ export async function forkSession(
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error
+}
+
+async function copyFileHistoryBackups(
+  configDir: string,
+  sourceSessionId: SessionId,
+  targetSessionId: SessionId,
+): Promise<void> {
+  const sourceDirectory = join(configDir, 'file-history', sourceSessionId)
+  const targetDirectory = join(configDir, 'file-history', targetSessionId)
+  let names: string[]
+  try {
+    names = await readdir(sourceDirectory)
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return
+    throw error
+  }
+  await mkdir(targetDirectory, { recursive: true })
+  await Promise.all(
+    names.map(async (name) => {
+      const source = join(sourceDirectory, name)
+      const target = join(targetDirectory, name)
+      try {
+        await link(source, target)
+      } catch (error) {
+        if (isNodeError(error) && error.code === 'EEXIST') return
+        await copyFile(source, target)
+      }
+    }),
+  )
 }

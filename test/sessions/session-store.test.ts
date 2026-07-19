@@ -2,6 +2,7 @@ import { appendFile, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import type { FileHistorySnapshot } from '../../src/checkpoint/file-history.js'
 import { createAssistantMessage, createUserMessage } from '../../src/messages/create-message.js'
 import { asMessageUuid, asSessionId } from '../../src/sessions/ids.js'
 import { SessionWriter, getSessionPath, loadSession } from '../../src/sessions/session-store.js'
@@ -9,6 +10,7 @@ import { SessionWriter, getSessionPath, loadSession } from '../../src/sessions/s
 const SESSION_ONE = asSessionId('10000000-0000-4000-8000-000000000001')
 const MESSAGE_ONE = asMessageUuid('20000000-0000-4000-8000-000000000001')
 const MESSAGE_TWO = asMessageUuid('20000000-0000-4000-8000-000000000002')
+const MESSAGE_THREE = asMessageUuid('20000000-0000-4000-8000-000000000003')
 
 describe('session store', () => {
   it('persists messages with a parent chain and reloads them', async () => {
@@ -99,5 +101,64 @@ describe('session store', () => {
     const loaded = await loadSession({ configDir, cwd, sessionId })
 
     expect(loaded.name).toBe('final name')
+  })
+
+  it('rewinds by moving the conversation head while retaining prior records', async () => {
+    const configDir = await mkdtemp(join(tmpdir(), 'dock-session-rewind-'))
+    const cwd = '/work/project'
+    const sessionId = asSessionId('10000000-0000-4000-8000-000000000005')
+    const writer = await SessionWriter.create({ configDir, cwd, sessionId })
+    const first = createUserMessage(
+      { content: [{ type: 'text', text: 'first' }] },
+      { uuid: MESSAGE_ONE },
+    )
+    const discarded = createUserMessage(
+      { content: [{ type: 'text', text: 'discarded' }] },
+      { uuid: MESSAGE_TWO },
+    )
+    const replacement = createUserMessage(
+      { content: [{ type: 'text', text: 'replacement' }] },
+      { uuid: MESSAGE_THREE },
+    )
+    await writer.recordTranscript([first, discarded])
+    await writer.rewindConversation(MESSAGE_ONE)
+    await writer.recordTranscript([replacement])
+    await writer.close()
+
+    const loaded = await loadSession({ configDir, cwd, sessionId })
+
+    expect(loaded.messages.map(({ uuid }) => uuid)).toEqual([MESSAGE_ONE, MESSAGE_THREE])
+    expect(
+      loaded.records.find(
+        (record) =>
+          (record.type === 'user' || record.type === 'assistant') && record.uuid === MESSAGE_THREE,
+      ),
+    ).toMatchObject({ parentUuid: MESSAGE_ONE })
+    expect(loaded.records.some((record) => record.type === 'rewind')).toBe(true)
+  })
+
+  it('persists file-history snapshots for resume', async () => {
+    const configDir = await mkdtemp(join(tmpdir(), 'dock-session-file-history-'))
+    const cwd = '/work/project'
+    const sessionId = asSessionId('10000000-0000-4000-8000-000000000006')
+    const writer = await SessionWriter.create({ configDir, cwd, sessionId })
+    const snapshot: FileHistorySnapshot = {
+      messageId: MESSAGE_ONE,
+      timestamp: new Date('2026-08-27T00:00:00.000Z'),
+      trackedFileBackups: {
+        'file.txt': {
+          backupFileName: 'abc@v1',
+          backupTime: new Date('2026-08-27T00:00:00.000Z'),
+          version: 1,
+        },
+      },
+    }
+    await writer.recordFileHistorySnapshot(snapshot, false)
+    await writer.close()
+
+    const loaded = await loadSession({ configDir, cwd, sessionId })
+
+    expect(loaded.fileHistorySnapshots).toHaveLength(1)
+    expect(loaded.fileHistorySnapshots[0]).toMatchObject({ messageId: MESSAGE_ONE })
   })
 })

@@ -1,6 +1,7 @@
 import { createHash, type UUID } from 'node:crypto'
 import { mkdir, open, readFile, unlink, type FileHandle } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
+import type { FileHistorySnapshot } from '../checkpoint/file-history.js'
 import type { TranscriptMessage } from '../messages/create-message.js'
 import { asSessionId, isUuid, type SessionId } from './ids.js'
 
@@ -26,9 +27,36 @@ export type SessionNameRecord = {
   timestamp: string
 }
 
-export type SessionRecord = SessionMetadataRecord | SessionMessageRecord | SessionNameRecord
+export type SessionRewindRecord = {
+  type: 'rewind'
+  targetUuid: UUID
+  timestamp: string
+}
+
+export type FileHistorySnapshotRecord = {
+  type: 'file-history-snapshot'
+  isSnapshotUpdate: boolean
+  messageId: UUID
+  snapshot: {
+    messageId: UUID
+    timestamp: string
+    trackedFileBackups: Record<
+      string,
+      { backupFileName: string | null; backupTime: string; version: number }
+    >
+  }
+}
+
+export type SessionRecord =
+  | SessionMetadataRecord
+  | SessionMessageRecord
+  | SessionNameRecord
+  | SessionRewindRecord
+  | FileHistorySnapshotRecord
 
 export type LoadedSession = {
+  fileHistorySnapshots: readonly FileHistorySnapshot[]
+  headUuid: UUID | null
   messages: readonly TranscriptMessage[]
   metadata: SessionMetadataRecord
   name?: string
@@ -124,12 +152,11 @@ export class SessionWriter {
     let file: FileHandle | undefined
     try {
       const loaded = await loadSession(options)
-      const headUuid = [...loaded.records].reverse().find(isSessionMessageRecord)?.uuid
       file = await open(sessionPath, 'a', 0o600)
       return new SessionWriter({
         cwd: loaded.metadata.cwd,
         file,
-        headUuid: headUuid ?? null,
+        headUuid: loaded.headUuid,
         lock,
         lockPath,
         messageUuids: new Set(loaded.messages.map((message) => message.uuid)),
@@ -171,6 +198,41 @@ export class SessionWriter {
       name: normalized,
       timestamp: this.#now().toISOString(),
       type: 'session_name',
+    })
+  }
+
+  async rewindConversation(targetUuid: UUID): Promise<void> {
+    this.#assertOpen()
+    if (!this.#messageUuids.has(targetUuid)) {
+      throw new Error(`Cannot rewind to unknown message UUID ${targetUuid}`)
+    }
+    await appendAndSync(this.#file, {
+      targetUuid,
+      timestamp: this.#now().toISOString(),
+      type: 'rewind',
+    })
+    this.#headUuid = targetUuid
+  }
+
+  async recordFileHistorySnapshot(
+    snapshot: FileHistorySnapshot,
+    isSnapshotUpdate: boolean,
+  ): Promise<void> {
+    this.#assertOpen()
+    await appendAndSync(this.#file, {
+      isSnapshotUpdate,
+      messageId: snapshot.messageId,
+      snapshot: {
+        messageId: snapshot.messageId,
+        timestamp: snapshot.timestamp.toISOString(),
+        trackedFileBackups: Object.fromEntries(
+          Object.entries(snapshot.trackedFileBackups).map(([path, backup]) => [
+            path,
+            { ...backup, backupTime: backup.backupTime.toISOString() },
+          ]),
+        ),
+      },
+      type: 'file-history-snapshot',
     })
   }
 
@@ -216,10 +278,11 @@ export async function loadSession(location: SessionLocation): Promise<LoadedSess
     throw new Error(`Session ${sessionPath} is missing its session_start record`)
   }
 
+  const { headUuid, messages } = buildActiveConversation(records)
   return {
-    messages: records
-      .filter(isSessionMessageRecord)
-      .map(({ parentUuid: _parentUuid, sessionId: _sessionId, cwd: _cwd, ...message }) => message),
+    fileHistorySnapshots: collectFileHistorySnapshots(records),
+    headUuid,
+    messages,
     metadata,
     ...(() => {
       const renamed = [...records]
@@ -331,11 +394,92 @@ function parseSessionRecord(value: unknown, path: string, line: number): Session
     }
     return value as SessionNameRecord
   }
+  if (value.type === 'rewind') {
+    if (
+      typeof value.targetUuid !== 'string' ||
+      !isUuid(value.targetUuid) ||
+      typeof value.timestamp !== 'string'
+    ) {
+      throw new Error(`Invalid rewind record at ${path}:${line}`)
+    }
+    return value as SessionRewindRecord
+  }
+  if (value.type === 'file-history-snapshot') {
+    if (
+      typeof value.messageId !== 'string' ||
+      !isUuid(value.messageId) ||
+      typeof value.isSnapshotUpdate !== 'boolean' ||
+      !isObject(value.snapshot)
+    ) {
+      throw new Error(`Invalid file-history-snapshot record at ${path}:${line}`)
+    }
+    return value as FileHistorySnapshotRecord
+  }
   throw new Error(`Unknown session record type ${value.type} at ${path}:${line}`)
 }
 
 function isSessionMessageRecord(record: SessionRecord): record is SessionMessageRecord {
   return record.type === 'user' || record.type === 'assistant'
+}
+
+function buildActiveConversation(records: readonly SessionRecord[]): {
+  headUuid: UUID | null
+  messages: TranscriptMessage[]
+} {
+  const messagesByUuid = new Map<UUID, SessionMessageRecord>()
+  let headUuid: UUID | null = null
+  for (const record of records) {
+    if (isSessionMessageRecord(record)) {
+      messagesByUuid.set(record.uuid, record)
+      headUuid = record.uuid
+    } else if (record.type === 'rewind') {
+      headUuid = record.targetUuid
+    }
+  }
+
+  const chain: SessionMessageRecord[] = []
+  const visited = new Set<UUID>()
+  let current = headUuid
+  while (current) {
+    if (visited.has(current)) throw new Error(`Cycle detected in parentUuid chain at ${current}`)
+    visited.add(current)
+    const message = messagesByUuid.get(current)
+    if (!message) throw new Error(`Missing message ${current} in parentUuid chain`)
+    chain.push(message)
+    current = message.parentUuid
+  }
+
+  return {
+    headUuid,
+    messages: chain
+      .reverse()
+      .map(({ parentUuid: _parentUuid, sessionId: _sessionId, cwd: _cwd, ...message }) => message),
+  }
+}
+
+function collectFileHistorySnapshots(records: readonly SessionRecord[]): FileHistorySnapshot[] {
+  const snapshots: FileHistorySnapshot[] = []
+  for (const record of records) {
+    if (record.type !== 'file-history-snapshot') continue
+    const snapshot: FileHistorySnapshot = {
+      messageId: record.snapshot.messageId,
+      timestamp: new Date(record.snapshot.timestamp),
+      trackedFileBackups: Object.fromEntries(
+        Object.entries(record.snapshot.trackedFileBackups).map(([path, backup]) => [
+          path,
+          { ...backup, backupTime: new Date(backup.backupTime) },
+        ]),
+      ),
+    }
+    if (record.isSnapshotUpdate) {
+      const index = snapshots.findLastIndex((candidate) => candidate.messageId === record.messageId)
+      if (index >= 0) snapshots[index] = snapshot
+      else snapshots.push(snapshot)
+    } else {
+      snapshots.push(snapshot)
+    }
+  }
+  return snapshots
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

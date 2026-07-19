@@ -30,12 +30,30 @@ export class FileHistory {
   readonly #configDir: string
   readonly #cwd: string
   readonly #sessionId: SessionId
-  #state: FileHistoryState = { snapshots: [], trackedFiles: new Set(), snapshotSequence: 0 }
+  readonly #onSnapshot:
+    | ((snapshot: FileHistorySnapshot, isSnapshotUpdate: boolean) => Promise<void> | void)
+    | undefined
+  #state: FileHistoryState
 
-  constructor(options: { configDir: string; cwd: string; sessionId: SessionId }) {
+  constructor(options: {
+    configDir: string
+    cwd: string
+    sessionId: SessionId
+    snapshots?: readonly FileHistorySnapshot[]
+    onSnapshot?: (snapshot: FileHistorySnapshot, isSnapshotUpdate: boolean) => Promise<void> | void
+  }) {
     this.#configDir = resolve(options.configDir)
     this.#cwd = resolve(options.cwd)
     this.#sessionId = options.sessionId
+    this.#onSnapshot = options.onSnapshot
+    const snapshots = [...(options.snapshots ?? [])].slice(-MAX_SNAPSHOTS)
+    this.#state = {
+      snapshots,
+      trackedFiles: new Set(
+        snapshots.flatMap((snapshot) => Object.keys(snapshot.trackedFileBackups)),
+      ),
+      snapshotSequence: snapshots.length,
+    }
   }
 
   get state(): FileHistoryState {
@@ -67,6 +85,7 @@ export class FileHistory {
       trackedFiles: this.#state.trackedFiles,
       snapshotSequence: this.#state.snapshotSequence + 1,
     }
+    await this.#onSnapshot?.(snapshot, false)
   }
 
   async trackEdit(filePath: string, _messageId: UUID): Promise<void> {
@@ -83,6 +102,7 @@ export class FileHistory {
     const backup = await this.#createBackup(absolutePath, (previousBackup?.version ?? 0) + 1)
     snapshot.trackedFileBackups[trackingPath] = backup
     this.#state.trackedFiles.add(trackingPath)
+    await this.#onSnapshot?.(snapshot, true)
   }
 
   async rewind(messageId: UUID): Promise<string[]> {
