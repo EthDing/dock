@@ -7,8 +7,10 @@
     "dock": "dist/cli.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "0.121.0",
     "@dock/tui": "workspace:*",
     "fast-glob": "3.3.3",
+    "openai": "7.5.0",
     "zod": "4.4.3"
   },
   "engines": {

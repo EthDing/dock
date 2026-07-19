@@ -43,7 +43,7 @@ export type AgentLoopResult = {
 
 type PendingBlock =
   | { type: 'text'; text: string }
-  | { type: 'thinking'; thinking: string }
+  | { type: 'thinking'; thinking: string; signature: string }
   | { type: 'tool_use'; id: string; name: string; partialJson: string }
 
 export async function* runAgentLoop(
@@ -83,12 +83,13 @@ export async function* runAgentLoop(
           switch (event.type) {
             case 'message_start':
               messageId = event.messageId
+              usage = { ...usage, ...event.usage }
               break
             case 'content_block_start':
               if (event.block.type === 'text') {
                 blocks.set(event.index, { type: 'text', text: '' })
               } else if (event.block.type === 'thinking') {
-                blocks.set(event.index, { type: 'thinking', thinking: '' })
+                blocks.set(event.index, { type: 'thinking', thinking: '', signature: '' })
               } else {
                 blocks.set(event.index, {
                   type: 'tool_use',
@@ -105,6 +106,8 @@ export async function* runAgentLoop(
                 block.text += event.delta.text
               } else if (block.type === 'thinking' && event.delta.type === 'thinking_delta') {
                 block.thinking += event.delta.thinking
+              } else if (block.type === 'thinking' && event.delta.type === 'signature_delta') {
+                block.signature += event.delta.signature
               } else if (block.type === 'tool_use' && event.delta.type === 'input_json_delta') {
                 block.partialJson += event.delta.partialJson
               } else {
@@ -119,7 +122,7 @@ export async function* runAgentLoop(
               break
             case 'message_delta':
               stopReason = event.stopReason
-              usage = event.usage
+              usage = { ...usage, ...event.usage }
               break
             case 'message_stop':
               break

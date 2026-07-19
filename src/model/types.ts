@@ -9,6 +9,7 @@ export type TextBlock = {
 export type ThinkingBlock = {
   type: 'thinking'
   thinking: string
+  signature?: string
 }
 
 export type ToolUseBlock = {
@@ -56,6 +57,7 @@ export type ModelToolDefinition = {
 }
 
 export type ModelRequest = {
+  maxOutputTokens?: number
   modelId: string
   systemPrompt: readonly string[]
   messages: readonly ModelMessage[]
@@ -63,7 +65,7 @@ export type ModelRequest = {
 }
 
 export type ModelStreamEvent =
-  | { type: 'message_start'; messageId: string }
+  | { type: 'message_start'; messageId: string; usage?: Usage }
   | {
       type: 'content_block_start'
       index: number
@@ -78,6 +80,7 @@ export type ModelStreamEvent =
       delta:
         | { type: 'text_delta'; text: string }
         | { type: 'thinking_delta'; thinking: string }
+        | { type: 'signature_delta'; signature: string }
         | { type: 'input_json_delta'; partialJson: string }
     }
   | { type: 'content_block_stop'; index: number }
