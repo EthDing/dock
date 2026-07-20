@@ -16,6 +16,9 @@ const providerSettingsSchema = z
   })
   .strict()
 
+export type ProviderSettings = z.infer<typeof providerSettingsSchema>
+export type ProviderProtocol = z.infer<typeof providerProtocolSchema>
+
 const permissionModeSchema = z.enum([
   'default',
   'acceptEdits',

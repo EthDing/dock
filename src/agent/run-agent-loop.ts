@@ -1,4 +1,5 @@
 import type { UUID } from 'node:crypto'
+import type { ContextManager } from '../context/context-manager.js'
 import type {
   AssistantMessage,
   JsonObject,
@@ -20,6 +21,7 @@ import type { AgentTool, AgentToolResult, CanUseTool } from '../tools/types.js'
 
 export type AgentLoopOptions = {
   canUseTool?: CanUseTool
+  contextManager?: ContextManager
   model: ModelAdapter
   modelId: string
   systemPrompt: readonly string[]
@@ -30,6 +32,7 @@ export type AgentLoopOptions = {
 }
 
 export type AgentEvent =
+  | { type: 'compact'; messages: readonly TranscriptMessage[] }
   | { type: 'model_stream'; event: ModelStreamEvent }
   | { type: 'assistant_message'; message: AssistantTranscriptMessage }
   | { type: 'tool_execution_start'; toolUse: ToolUseBlock }
@@ -60,15 +63,26 @@ export async function* runAgentLoop(
 
   try {
     while (!controller.signal.aborted) {
+      const toolDefinitions = options.tools.map(({ description, inputSchema, name }) => ({
+        description,
+        inputSchema,
+        name,
+      }))
+      if (options.contextManager) {
+        const prepared = await options.contextManager.prepare(messages, {
+          systemPrompt: options.systemPrompt,
+          tools: toolDefinitions,
+        })
+        if (prepared.messages !== messages) {
+          messages.splice(0, messages.length, ...prepared.messages)
+        }
+        if (prepared.compacted) yield { messages: [...messages], type: 'compact' }
+      }
       const request: ModelRequest = {
         messages: messages.map((message) => message.message),
         modelId: options.modelId,
         systemPrompt: options.systemPrompt,
-        tools: options.tools.map(({ description, inputSchema, name }) => ({
-          description,
-          inputSchema,
-          name,
-        })),
+        tools: toolDefinitions,
       }
 
       const blocks = new Map<number, PendingBlock>()

@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { ContextManager } from '../../src/context/context-manager.js'
+import { createAssistantMessage } from '../../src/messages/create-message.js'
 import {
   runAgentLoop,
   type AgentEvent,
@@ -323,5 +325,41 @@ describe('runAgentLoop', () => {
 
     expect(result.reason).toBe('aborted')
     expect(model.requests).toHaveLength(0)
+  })
+
+  it('prepares compacted history before a model request', async () => {
+    const model = new FakeModelAdapter([textResponse('done')])
+    const contextManager = new ContextManager({
+      contextWindow: 100_000,
+      maxOutputTokens: 8_000,
+      preserveRecentMessages: 1,
+      summarize: async () => 'compact summary',
+    })
+
+    await drain(
+      runAgentLoop({
+        contextManager,
+        messages: [
+          createUserMessage({ content: [{ type: 'text', text: 'old' }] }),
+          createAssistantMessage({
+            content: [{ type: 'text', text: 'large' }],
+            id: 'provider-large',
+            role: 'assistant',
+            stopReason: 'end_turn',
+            usage: { inputTokens: 80_000, outputTokens: 1_000 },
+          }),
+          createUserMessage({ content: [{ type: 'text', text: 'recent' }] }),
+        ],
+        model,
+        modelId: 'test-model',
+        systemPrompt: [],
+        tools: [],
+      }),
+    )
+
+    expect(model.requests[0]?.messages[0]).toMatchObject({
+      role: 'user',
+      content: [{ type: 'text', text: 'compact summary' }],
+    })
   })
 })
