@@ -13,10 +13,11 @@ export function createCanUseTool(options: {
     tool: AgentTool,
     input: JsonObject,
     decision: PermissionDecision,
+    signal: AbortSignal,
   ) => Promise<boolean>
   rules: PermissionRules
 }): CanUseTool {
-  return async (tool, input) => {
+  return async (tool, input, execution) => {
     const subject = tool.getPermissionSubject?.(input) ?? {
       isReadOnly: false,
       matchesSpecifier: () => false,
@@ -37,7 +38,7 @@ export function createCanUseTool(options: {
       }
     }
 
-    return (await options.requestApproval(tool, input, decision))
+    return (await options.requestApproval(tool, input, decision, execution.signal))
       ? { behavior: 'allow' }
       : { behavior: 'deny', message: `User denied ${tool.name}` }
   }

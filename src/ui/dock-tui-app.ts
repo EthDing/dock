@@ -3,6 +3,7 @@ import type { AgentEvent } from '../agent/run-agent-loop.js'
 import type { PermissionBroker, PermissionRequest } from '../permissions/permission-broker.js'
 import type { PermissionMode } from '../permissions/evaluate-permission.js'
 import type { TranscriptMessage } from '../messages/create-message.js'
+import type { ToolUseBlock } from '../model/types.js'
 import { editorTheme, markdownTheme, selectListTheme } from './themes.js'
 
 export type DockUiController = {
@@ -73,12 +74,16 @@ export class DockTuiApp {
     this.#tui.addChild(this.#editor)
     this.#tui.setFocus(this.#editor)
     this.#editor.onSubmit = (text) => {
-      void this.submit(text)
+      void this.submit(text).catch((error) => this.#showError(error))
     }
     this.#tui.addInputListener((data) => {
       if (matchesKey(data, Key.ctrl('c'))) {
         if (this.#busy) this.#controller.abort('interrupt')
         else void this.stop()
+        return { consume: true }
+      }
+      if (matchesKey(data, Key.escape) && this.#busy) {
+        this.#controller.abort('interrupt')
         return { consume: true }
       }
       if (matchesKey(data, Key.shift('tab')) && !this.#busy) {
@@ -180,6 +185,8 @@ export class DockTuiApp {
     this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · working`)
     let assistant: Markdown | undefined
     let assistantText = ''
+    let thinking: Text | undefined
+    let thinkingText = ''
 
     try {
       for await (const event of this.#controller.submit(trimmed)) {
@@ -194,10 +201,23 @@ export class DockTuiApp {
             this.#insertTranscript(assistant)
           }
           assistant.setText(`**Dock**\n\n${assistantText}`)
+        } else if (
+          event.type === 'model_stream' &&
+          event.event.type === 'content_block_delta' &&
+          event.event.delta.type === 'thinking_delta'
+        ) {
+          thinkingText += event.event.delta.thinking
+          if (!thinking) {
+            thinking = new Text('', 1, 0)
+            this.#insertTranscript(thinking)
+          }
+          thinking.setText(`Thinking: ${thinkingText}`)
         } else if (event.type === 'tool_execution_start') {
-          this.#insertTranscript(new Text(`● ${event.toolUse.name}`, 1, 0))
-        } else if (event.type === 'tool_result' && event.result.isError) {
-          this.#insertTranscript(new Text(`  Error: ${event.result.content}`, 1, 0))
+          this.#renderToolStart(event.toolUse)
+        } else if (event.type === 'tool_result') {
+          this.#insertTranscript(
+            new Text(event.result.isError ? `  Error: ${event.result.content}` : '  Done', 1, 0),
+          )
         } else if (event.type === 'compact') {
           this.#insertTranscript(new Text('  Conversation compacted', 1, 0))
         }
@@ -222,6 +242,25 @@ export class DockTuiApp {
     this.#tui.children.splice(this.#tui.children.length - 2, 0, component)
   }
 
+  #renderToolStart(toolUse: ToolUseBlock): void {
+    const path = typeof toolUse.input.file_path === 'string' ? toolUse.input.file_path : undefined
+    const command = typeof toolUse.input.command === 'string' ? toolUse.input.command : undefined
+    const pattern = typeof toolUse.input.pattern === 'string' ? toolUse.input.pattern : undefined
+    const detail = path ?? command ?? pattern
+    this.#insertTranscript(
+      new Text(`● ${toolUse.name}${detail ? `(${truncateDisplay(detail)})` : ''}`, 1, 0),
+    )
+    if (toolUse.name !== 'Edit') return
+    const oldString = toolUse.input.old_string
+    const newString = toolUse.input.new_string
+    if (typeof oldString === 'string') {
+      this.#insertTranscript(new Text(`  - ${truncateDisplay(oldString)}`, 1, 0))
+    }
+    if (typeof newString === 'string') {
+      this.#insertTranscript(new Text(`  + ${truncateDisplay(newString)}`, 1, 0))
+    }
+  }
+
   #clearTranscript(): void {
     this.#tui.children.splice(2, Math.max(0, this.#tui.children.length - 4))
     this.#tui.requestRender(true)
@@ -240,15 +279,30 @@ export class DockTuiApp {
         selectListTheme,
       )
       const overlay = this.#tui.showOverlay(list, { anchor: 'bottom-center', width: '70%' })
+      let settled = false
       const finish = (approved: boolean) => {
+        if (settled) return
+        settled = true
+        request.signal.removeEventListener('abort', onAbort)
         overlay.hide()
         this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · working`)
         this.#tui.requestRender(true)
         resolve(approved)
       }
+      const onAbort = () => finish(false)
       list.onSelect = (item) => finish(item.value === 'yes')
       list.onCancel = () => finish(false)
+      request.signal.addEventListener('abort', onAbort, { once: true })
+      if (request.signal.aborted) finish(false)
     })
+  }
+
+  #showError(error: unknown): void {
+    this.#insertTranscript(
+      new Text(`Error: ${error instanceof Error ? error.message : String(error)}`, 1, 0),
+    )
+    this.#setReadyStatus()
+    this.#tui.requestRender()
   }
 
   async #selectPermissionMode(): Promise<void> {
@@ -341,4 +395,9 @@ export class DockTuiApp {
       list.onCancel = () => finish()
     })
   }
+}
+
+function truncateDisplay(value: string): string {
+  const normalized = value.replaceAll('\n', '↵')
+  return normalized.length <= 240 ? normalized : `${normalized.slice(0, 237)}...`
 }

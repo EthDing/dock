@@ -79,8 +79,8 @@ export async function startDock(options: StartDockOptions): Promise<void> {
   const permissionModeState = new PermissionModeState(permissionMode)
   const canUseTool = createCanUseTool({
     mode: () => permissionModeState.value,
-    requestApproval: (tool, input, decision) =>
-      permissionBroker.requestApproval(tool, input, decision),
+    requestApproval: (tool, input, decision, signal) =>
+      permissionBroker.requestApproval(tool, input, decision, signal),
     rules: {
       allow: loadedSettings.settings.permissions?.allow ?? [],
       ask: loadedSettings.settings.permissions?.ask ?? [],

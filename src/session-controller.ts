@@ -79,7 +79,7 @@ export class SessionController {
       let next = await generator.next()
       while (!next.done) {
         const event = next.value
-        if (event.type === 'assistant_message') {
+        if (event.type === 'assistant_message' || event.type === 'user_message') {
           await this.#writer.recordTranscript([event.message])
         } else if (event.type === 'compact') {
           await this.#writer.recordCompaction(event.messages)

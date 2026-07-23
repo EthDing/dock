@@ -24,5 +24,5 @@ export type ToolUseDecision = { behavior: 'allow' } | { behavior: 'deny'; messag
 export type CanUseTool = (
   tool: AgentTool,
   input: JsonObject,
-  options: { parentMessageUuid: UUID; toolUseId: string },
+  options: { parentMessageUuid: UUID; signal: AbortSignal; toolUseId: string },
 ) => Promise<ToolUseDecision>

@@ -5,6 +5,7 @@ import type { AgentTool } from '../tools/types.js'
 export type PermissionRequest = {
   decision: PermissionDecision
   input: JsonObject
+  signal: AbortSignal
   tool: AgentTool
 }
 
@@ -19,7 +20,22 @@ export class PermissionBroker {
     tool: AgentTool,
     input: JsonObject,
     decision: PermissionDecision,
+    signal: AbortSignal,
   ): Promise<boolean> {
-    return (await this.#handler?.({ decision, input, tool })) ?? false
+    if (signal.aborted) return false
+    const approval = this.#handler?.({ decision, input, signal, tool })
+    if (!approval) return false
+    let onAbort: (() => void) | undefined
+    try {
+      return await Promise.race([
+        approval,
+        new Promise<boolean>((resolve) => {
+          onAbort = () => resolve(false)
+          signal.addEventListener('abort', onAbort, { once: true })
+        }),
+      ])
+    } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort)
+    }
   }
 }

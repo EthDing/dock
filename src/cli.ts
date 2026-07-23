@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { pathToFileURL } from 'node:url'
-import { startDock } from './start-dock.js'
 
 export const DOCK_VERSION = '0.0.0'
 
@@ -21,6 +20,7 @@ export async function runCli(args: readonly string[], io: CliIo = defaultIo): Pr
     return 0
   }
   try {
+    const { startDock } = await import('./start-dock.js')
     await startDock({ args })
     return 0
   } catch (error) {

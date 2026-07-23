@@ -59,6 +59,42 @@ describe('DockTuiApp', () => {
     expect(rendered).toContain('hello from Dock')
   })
 
+  it('renders tool details and an Edit diff', async () => {
+    const controller: DockUiController = {
+      abort: () => {},
+      close: async () => {},
+      async *submit() {
+        yield {
+          type: 'tool_execution_start' as const,
+          toolUse: {
+            type: 'tool_use' as const,
+            id: 'edit-1',
+            name: 'Edit',
+            input: {
+              file_path: '/work/file.ts',
+              old_string: 'const before = true',
+              new_string: 'const after = true',
+            },
+          },
+        }
+        yield {
+          type: 'tool_result' as const,
+          result: { type: 'tool_result' as const, toolUseId: 'edit-1', content: 'Updated' },
+        }
+      },
+    }
+    const tui = new TuiMainScreen(new MemoryTerminal())
+    const app = new DockTuiApp({ controller, tui })
+
+    await app.submit('edit it')
+
+    const rendered = tui.render(80).join('\n')
+    expect(rendered).toContain('Edit(/work/file.ts)')
+    expect(rendered).toContain('- const before = true')
+    expect(rendered).toContain('+ const after = true')
+    expect(rendered).toContain('Done')
+  })
+
   it('routes session commands without sending them to the model', async () => {
     const calls: string[] = []
     const controller: DockUiController = {
@@ -117,6 +153,37 @@ describe('DockTuiApp', () => {
 
     expect(permissionMode).toBe('acceptEdits')
     expect(tui.render(80).join('\n')).toContain('acceptEdits · ready')
+    await app.stop()
+  })
+
+  it('interrupts an active turn with Escape', async () => {
+    let aborted = false
+    let release!: () => void
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const controller: DockUiController = {
+      abort: () => {
+        aborted = true
+        release()
+      },
+      close: async () => {},
+      async *submit() {
+        await blocked
+        yield { type: 'compact' as const, messages: [] }
+      },
+    }
+    const terminal = new MemoryTerminal()
+    const tui = new TuiMainScreen(terminal)
+    const app = new DockTuiApp({ controller, tui })
+    app.start()
+
+    const turn = app.submit('wait')
+    await Promise.resolve()
+    terminal.send('\u001b')
+    await turn
+
+    expect(aborted).toBe(true)
     await app.stop()
   })
 })

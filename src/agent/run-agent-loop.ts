@@ -17,6 +17,7 @@ import {
   createUserMessage,
   type AssistantTranscriptMessage,
   type TranscriptMessage,
+  type UserTranscriptMessage,
 } from '../messages/create-message.js'
 import type { AgentTool, AgentToolResult, CanUseTool } from '../tools/types.js'
 
@@ -37,6 +38,7 @@ export type AgentEvent =
   | { type: 'compact'; messages: readonly TranscriptMessage[] }
   | { type: 'model_stream'; event: ModelStreamEvent }
   | { type: 'assistant_message'; message: AssistantTranscriptMessage }
+  | { type: 'user_message'; message: UserTranscriptMessage }
   | { type: 'tool_execution_start'; toolUse: ToolUseBlock }
   | { type: 'tool_result'; result: ToolResultBlock }
 
@@ -211,12 +213,13 @@ export async function* runAgentLoop(
       const toolResults: ToolResultBlock[] = []
       for (const batch of partitionToolUses(toolUses, options.tools)) {
         for (const toolUse of batch.toolUses) {
-          if (controller.signal.aborted) return { messages, reason: 'aborted' }
           yield { type: 'tool_execution_start', toolUse }
         }
 
         let batchResults: ToolResultBlock[]
-        if (batch.isConcurrencySafe) {
+        if (controller.signal.aborted) {
+          batchResults = batch.toolUses.map(abortedToolResult)
+        } else if (batch.isConcurrencySafe) {
           batchResults = await Promise.all(
             batch.toolUses.map((toolUse) =>
               executeToolUse(
@@ -248,12 +251,23 @@ export async function* runAgentLoop(
         }
       }
 
-      messages.push(createUserMessage({ content: toolResults }))
+      const toolResultMessage = createUserMessage({ content: toolResults })
+      messages.push(toolResultMessage)
+      yield { type: 'user_message', message: toolResultMessage }
     }
 
     return { messages, reason: 'aborted' }
   } finally {
     externalSignal?.removeEventListener('abort', abort)
+  }
+}
+
+function abortedToolResult(toolUse: ToolUseBlock): ToolResultBlock {
+  return {
+    content: 'Tool execution aborted',
+    isError: true,
+    toolUseId: toolUse.id,
+    type: 'tool_result',
   }
 }
 
@@ -342,6 +356,7 @@ async function executeToolUse(
   } else {
     const decision = await canUseTool?.(tool, toolUse.input, {
       parentMessageUuid,
+      signal,
       toolUseId: toolUse.id,
     })
     if (decision?.behavior === 'deny') {

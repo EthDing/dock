@@ -80,7 +80,7 @@ describe('runAgentLoop', () => {
       textResponse('read complete'),
     ])
 
-    const { result } = await drain(
+    const { events, result } = await drain(
       runAgentLoop({
         messages: [createUserMessage({ content: [{ type: 'text', text: 'read it' }] })],
         model,
@@ -99,6 +99,14 @@ describe('runAgentLoop', () => {
     )
 
     expect(result.reason).toBe('completed')
+    expect(events.find((event) => event.type === 'user_message')).toMatchObject({
+      message: {
+        type: 'user',
+        message: {
+          content: [{ type: 'tool_result', toolUseId: 'tool-1' }],
+        },
+      },
+    })
     expect(model.requests).toHaveLength(2)
     expect(model.requests[1]?.messages.at(-1)).toEqual({
       role: 'user',
@@ -325,6 +333,68 @@ describe('runAgentLoop', () => {
 
     expect(result.reason).toBe('aborted')
     expect(model.requests).toHaveLength(0)
+  })
+
+  it('pairs a tool use with an error result when interrupted before execution', async () => {
+    const model = new FakeModelAdapter([
+      [
+        { type: 'message_start', messageId: 'assistant-tool' },
+        {
+          type: 'content_block_start',
+          index: 0,
+          block: { type: 'tool_use', id: 'tool-1', name: 'Read' },
+        },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_delta', stopReason: 'tool_use', usage: {} },
+        { type: 'message_stop' },
+      ],
+    ])
+    const controller = new AbortController()
+    let executions = 0
+    const generator = runAgentLoop({
+      messages: [createUserMessage({ content: [{ type: 'text', text: 'read' }] })],
+      model,
+      modelId: 'test-model',
+      signal: controller.signal,
+      systemPrompt: [],
+      tools: [
+        {
+          description: 'Read a file',
+          execute: async () => {
+            executions += 1
+            return { content: 'unexpected' }
+          },
+          inputSchema: { type: 'object' },
+          isConcurrencySafe: () => true,
+          name: 'Read',
+        },
+      ],
+    })
+
+    const events: AgentEvent[] = []
+    let next = await generator.next()
+    while (!next.done) {
+      events.push(next.value)
+      if (next.value.type === 'tool_execution_start') controller.abort('user')
+      next = await generator.next()
+    }
+
+    expect(executions).toBe(0)
+    expect(events.find((event) => event.type === 'user_message')).toMatchObject({
+      message: {
+        message: {
+          content: [
+            {
+              content: 'Tool execution aborted',
+              isError: true,
+              toolUseId: 'tool-1',
+              type: 'tool_result',
+            },
+          ],
+        },
+      },
+    })
+    expect(next.value).toMatchObject({ reason: 'aborted' })
   })
 
   it('prepares compacted history before a model request', async () => {

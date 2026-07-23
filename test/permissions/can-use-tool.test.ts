@@ -19,6 +19,7 @@ const tool = (name: string, readOnly: boolean): AgentTool => ({
 
 const context = {
   parentMessageUuid: asMessageUuid('b0000000-0000-4000-8000-000000000001'),
+  signal: new AbortController().signal,
   toolUseId: 'tool-1',
 }
 
