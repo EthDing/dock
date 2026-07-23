@@ -7,6 +7,7 @@ export type PermissionRules = {
 }
 
 export type PermissionSubject = {
+  isInWorkingDirectory: boolean
   isReadOnly: boolean
   matchesSpecifier: (pattern: string) => boolean
   name: string
@@ -37,19 +38,28 @@ export function evaluatePermission(options: {
 
   switch (options.mode) {
     case 'default':
-      return { behavior: options.subject.isReadOnly ? 'allow' : 'ask', source: 'mode' }
+      return {
+        behavior:
+          options.subject.isReadOnly && options.subject.isInWorkingDirectory ? 'allow' : 'ask',
+        source: 'mode',
+      }
     case 'acceptEdits':
       return {
         behavior:
-          options.subject.isReadOnly ||
-          options.subject.name === 'Edit' ||
-          options.subject.name === 'Write'
+          options.subject.isInWorkingDirectory &&
+          (options.subject.isReadOnly ||
+            options.subject.name === 'Edit' ||
+            options.subject.name === 'Write')
             ? 'allow'
             : 'ask',
         source: 'mode',
       }
     case 'plan':
-      return { behavior: options.subject.isReadOnly ? 'allow' : 'deny', source: 'mode' }
+      return {
+        behavior:
+          options.subject.isReadOnly && options.subject.isInWorkingDirectory ? 'allow' : 'deny',
+        source: 'mode',
+      }
     case 'dontAsk':
       return { behavior: 'deny', source: 'mode' }
     case 'bypassPermissions':

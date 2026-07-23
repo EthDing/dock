@@ -31,6 +31,7 @@ export type AgentLoopOptions = {
   tools: readonly AgentTool[]
   signal?: AbortSignal
   maxTurns?: number
+  maxOutputTokens?: number
   userContext?: Readonly<Record<string, string>>
 }
 
@@ -83,6 +84,7 @@ export async function* runAgentLoop(
         if (prepared.compacted) yield { messages: [...messages], type: 'compact' }
       }
       const request: ModelRequest = {
+        ...(options.maxOutputTokens ? { maxOutputTokens: options.maxOutputTokens } : {}),
         messages: [
           ...buildUserContextMessages(options.userContext),
           ...messages.map((message) => message.message),

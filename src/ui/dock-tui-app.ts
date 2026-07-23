@@ -157,6 +157,11 @@ export class DockTuiApp {
       this.#tui.requestRender()
       return
     }
+    if (trimmed === '/rename') {
+      this.#insertTranscript(new Text('Usage: /rename <name>', 1, 0))
+      this.#tui.requestRender()
+      return
+    }
     if (trimmed === '/permissions') {
       await this.#selectPermissionMode()
       return
@@ -177,6 +182,11 @@ export class DockTuiApp {
     if (trimmed.startsWith('/model ')) {
       await this.#sessionCommands?.setModel(trimmed.slice('/model '.length).trim())
       this.#renderControllerHistory()
+      return
+    }
+    if (trimmed === '/model') {
+      this.#insertTranscript(new Text('Usage: /model <provider:model-id>', 1, 0))
+      this.#tui.requestRender()
       return
     }
     this.#busy = true

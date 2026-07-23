@@ -73,6 +73,7 @@ export function createGlobTool(options: { cwd: string }): AgentTool {
       type: 'object',
     },
     getPermissionSubject: (input) => ({
+      isInWorkingDirectory: isPathWithin(cwd, resolve(cwd, optionalPath(input.path) ?? '.')),
       isReadOnly: true,
       matchesSpecifier: (pattern) =>
         typeof input.pattern === 'string' && matchesWildcard(pattern, input.pattern),
@@ -144,6 +145,7 @@ export function createGrepTool(options: { cwd: string }): AgentTool {
       type: 'object',
     },
     getPermissionSubject: (input) => ({
+      isInWorkingDirectory: isPathWithin(cwd, resolve(cwd, optionalPath(input.path) ?? '.')),
       isReadOnly: true,
       matchesSpecifier: (pattern) =>
         typeof input.pattern === 'string' && matchesWildcard(pattern, input.pattern),
@@ -153,6 +155,15 @@ export function createGrepTool(options: { cwd: string }): AgentTool {
     isConcurrencySafe: () => true,
     name: 'Grep',
   }
+}
+
+function optionalPath(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+function isPathWithin(cwd: string, filePath: string): boolean {
+  const pathFromCwd = relative(cwd, filePath)
+  return pathFromCwd === '' || (!pathFromCwd.startsWith('..') && !isAbsolute(pathFromCwd))
 }
 
 async function runProcess(

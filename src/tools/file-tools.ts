@@ -1,5 +1,5 @@
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, resolve } from 'node:path'
+import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { z } from 'zod'
 import type { FileHistory } from '../checkpoint/file-history.js'
 import type { JsonObject } from '../model/types.js'
@@ -71,6 +71,8 @@ export function createReadTool(dependencies: FileToolDependencies): AgentTool {
       type: 'object',
     },
     getPermissionSubject: (input) => ({
+      isInWorkingDirectory:
+        typeof input.file_path === 'string' && isPathWithin(dependencies.cwd, input.file_path),
       isReadOnly: true,
       matchesSpecifier: (pattern) =>
         typeof input.file_path === 'string' &&
@@ -109,6 +111,8 @@ export function createWriteTool(dependencies: FileToolDependencies): AgentTool {
       type: 'object',
     },
     getPermissionSubject: (input) => ({
+      isInWorkingDirectory:
+        typeof input.file_path === 'string' && isPathWithin(dependencies.cwd, input.file_path),
       isReadOnly: false,
       matchesSpecifier: (pattern) =>
         typeof input.file_path === 'string' &&
@@ -173,6 +177,8 @@ export function createEditTool(dependencies: FileToolDependencies): AgentTool {
       type: 'object',
     },
     getPermissionSubject: (input) => ({
+      isInWorkingDirectory:
+        typeof input.file_path === 'string' && isPathWithin(dependencies.cwd, input.file_path),
       isReadOnly: false,
       matchesSpecifier: (pattern) =>
         typeof input.file_path === 'string' &&
@@ -201,6 +207,12 @@ async function assertSafeToWriteExisting(filePath: string, state: FileReadState)
 function absolutePath(filePath: string): string {
   if (!isAbsolute(filePath)) throw new Error(`File path must be absolute: ${filePath}`)
   return resolve(filePath)
+}
+
+function isPathWithin(cwd: string, filePath: string): boolean {
+  if (!isAbsolute(filePath)) return false
+  const pathFromCwd = relative(resolve(cwd), resolve(filePath))
+  return pathFromCwd === '' || (!pathFromCwd.startsWith('..') && !isAbsolute(pathFromCwd))
 }
 
 function countOccurrences(content: string, value: string): number {

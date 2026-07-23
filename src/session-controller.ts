@@ -12,6 +12,7 @@ export class SessionController {
   readonly #fileHistory: FileHistory
   readonly #model: ModelAdapter
   readonly #modelId: string
+  readonly #maxOutputTokens: number | undefined
   readonly #systemPrompt: readonly string[]
   readonly #tools: readonly AgentTool[]
   readonly #userContext: Readonly<Record<string, string>> | undefined
@@ -28,6 +29,7 @@ export class SessionController {
     contextManager?: ContextManager
     fileHistory: FileHistory
     initialMessages?: readonly TranscriptMessage[]
+    maxOutputTokens?: number
     model: ModelAdapter
     modelId: string
     permissionModeState?: PermissionModeState
@@ -40,6 +42,7 @@ export class SessionController {
     this.#contextManager = options.contextManager
     this.#fileHistory = options.fileHistory
     this.#messages = [...(options.initialMessages ?? [])]
+    this.#maxOutputTokens = options.maxOutputTokens
     this.#model = options.model
     this.#modelId = options.modelId
     this.#permissionModeState = options.permissionModeState
@@ -68,6 +71,7 @@ export class SessionController {
         ...(this.#canUseTool ? { canUseTool: this.#canUseTool } : {}),
         ...(this.#contextManager ? { contextManager: this.#contextManager } : {}),
         messages: this.#messages,
+        ...(this.#maxOutputTokens ? { maxOutputTokens: this.#maxOutputTokens } : {}),
         model: this.#model,
         modelId: this.#modelId,
         signal: abortController.signal,

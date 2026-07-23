@@ -46,6 +46,7 @@ export function createBashTool(options: { cwd: string; homeDir?: string }): Agen
     getPermissionSubject: (input) => {
       const command = typeof input.command === 'string' ? input.command : ''
       return {
+        isInWorkingDirectory: true,
         isReadOnly: isReadOnlyBashCommand(command),
         matchesSpecifier: (pattern) => matchesCommandSpecifier(pattern, command),
         name: 'Bash',

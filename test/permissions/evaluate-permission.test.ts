@@ -13,6 +13,7 @@ const subject = (
     requiresBypassConfirmation?: boolean
   } = {},
 ): PermissionSubject => ({
+  isInWorkingDirectory: true,
   isReadOnly: options.readOnly ?? false,
   matchesSpecifier: (pattern) => pattern === options.specifier,
   name,
@@ -63,5 +64,15 @@ describe('evaluatePermission', () => {
     expect(decide('bypassPermissions', subject('Bash', { requiresBypassConfirmation: true }))).toBe(
       'ask',
     )
+  })
+
+  it('requires policy approval for access outside the working directory', () => {
+    const externalRead = { ...subject('Read', { readOnly: true }), isInWorkingDirectory: false }
+    const externalEdit = { ...subject('Edit'), isInWorkingDirectory: false }
+
+    expect(decide('default', externalRead)).toBe('ask')
+    expect(decide('acceptEdits', externalEdit)).toBe('ask')
+    expect(decide('plan', externalRead)).toBe('deny')
+    expect(decide('default', externalRead, { allow: ['Read'] })).toBe('allow')
   })
 })

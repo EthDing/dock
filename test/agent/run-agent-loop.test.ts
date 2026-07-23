@@ -59,6 +59,23 @@ describe('runAgentLoop', () => {
     expect(model.requests).toHaveLength(1)
   })
 
+  it('passes the configured output token limit to the model', async () => {
+    const model = new FakeModelAdapter([textResponse('done')])
+
+    await drain(
+      runAgentLoop({
+        maxOutputTokens: 4096,
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'hello' }] })],
+        model,
+        modelId: 'test-model',
+        systemPrompt: [],
+        tools: [],
+      }),
+    )
+
+    expect(model.requests[0]?.maxOutputTokens).toBe(4096)
+  })
+
   it('executes a tool and feeds its result into the next model turn', async () => {
     const model = new FakeModelAdapter([
       [

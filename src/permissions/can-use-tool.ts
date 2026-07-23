@@ -19,6 +19,7 @@ export function createCanUseTool(options: {
 }): CanUseTool {
   return async (tool, input, execution) => {
     const subject = tool.getPermissionSubject?.(input) ?? {
+      isInWorkingDirectory: false,
       isReadOnly: false,
       matchesSpecifier: () => false,
       name: tool.name,

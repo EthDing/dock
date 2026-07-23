@@ -132,6 +132,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       contextManager,
       fileHistory,
       initialMessages: existing?.messages ?? [],
+      ...(provider.maxOutputTokens ? { maxOutputTokens: provider.maxOutputTokens } : {}),
       model,
       modelId,
       permissionModeState,

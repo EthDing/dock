@@ -7,6 +7,7 @@ const tool = (name: string, readOnly: boolean): AgentTool => ({
   description: name,
   execute: async () => ({ content: '' }),
   getPermissionSubject: () => ({
+    isInWorkingDirectory: true,
     isReadOnly: readOnly,
     matchesSpecifier: () => false,
     name,
