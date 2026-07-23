@@ -1,0 +1,344 @@
+import { Editor, Key, Markdown, SelectList, Spacer, Text, matchesKey, type TUI } from '@dock/tui'
+import type { AgentEvent } from '../agent/run-agent-loop.js'
+import type { PermissionBroker, PermissionRequest } from '../permissions/permission-broker.js'
+import type { PermissionMode } from '../permissions/evaluate-permission.js'
+import type { TranscriptMessage } from '../messages/create-message.js'
+import { editorTheme, markdownTheme, selectListTheme } from './themes.js'
+
+export type DockUiController = {
+  abort: (reason?: unknown) => void
+  close: () => Promise<void>
+  submit: (text: string) => AsyncIterable<AgentEvent>
+  compact?: (instructions?: string) => Promise<void>
+  contextSummary?: () => string
+  permissionMode?: string
+  rename?: (name: string) => Promise<void>
+  rewind?: (
+    uuid: `${string}-${string}-${string}-${string}-${string}`,
+    options: { conversation: boolean; files: boolean },
+  ) => Promise<void>
+  rewindPoints?: () => Array<{
+    label: string
+    uuid: `${string}-${string}-${string}-${string}-${string}`
+  }>
+  setPermissionMode?: (mode: PermissionMode) => void
+  messages?: readonly TranscriptMessage[]
+}
+
+export type DockSessionCommands = {
+  branch: (name?: string) => Promise<void>
+  clear: () => Promise<void>
+  listSessions: () => Promise<Array<{ label: string; value: string }>>
+  resume: (idOrName: string) => Promise<void>
+  setModel: (reference: string) => Promise<void>
+}
+
+export class DockTuiApp {
+  readonly #controller: DockUiController
+  readonly #editor: Editor
+  readonly #status: Text
+  readonly #tui: TUI
+  readonly #sessionCommands: DockSessionCommands | undefined
+  readonly #permissionCycle: PermissionMode[]
+  readonly #queue: string[] = []
+  readonly #stopped: Promise<void>
+  readonly #resolveStopped: () => void
+  #busy = false
+  #lastEscapeAt = 0
+
+  constructor(options: {
+    controller: DockUiController
+    permissionBroker?: PermissionBroker
+    sessionCommands?: DockSessionCommands
+    tui: TUI
+  }) {
+    this.#controller = options.controller
+    this.#tui = options.tui
+    this.#sessionCommands = options.sessionCommands
+    let resolveStopped!: () => void
+    this.#stopped = new Promise((resolve) => {
+      resolveStopped = resolve
+    })
+    this.#resolveStopped = resolveStopped
+    this.#editor = new Editor(this.#tui, editorTheme)
+    this.#status = new Text(`${this.#controller.permissionMode ?? 'default'} · ready`, 1, 0)
+    this.#permissionCycle = ['default', 'acceptEdits', 'plan']
+    if (this.#controller.permissionMode === 'bypassPermissions') {
+      this.#permissionCycle.push('bypassPermissions')
+    }
+
+    this.#tui.addChild(new Text('Dock', 1, 0))
+    this.#tui.addChild(new Spacer(1))
+    this.#tui.addChild(this.#status)
+    this.#tui.addChild(this.#editor)
+    this.#tui.setFocus(this.#editor)
+    this.#editor.onSubmit = (text) => {
+      void this.submit(text)
+    }
+    this.#tui.addInputListener((data) => {
+      if (matchesKey(data, Key.ctrl('c'))) {
+        if (this.#busy) this.#controller.abort('interrupt')
+        else void this.stop()
+        return { consume: true }
+      }
+      if (matchesKey(data, Key.shift('tab')) && !this.#busy) {
+        this.#cyclePermissionMode()
+        return { consume: true }
+      }
+      if (
+        matchesKey(data, Key.escape) &&
+        !this.#busy &&
+        !this.#editor.getText() &&
+        Date.now() - this.#lastEscapeAt <= 500
+      ) {
+        this.#lastEscapeAt = 0
+        void this.#selectRewindPoint()
+        return { consume: true }
+      }
+      if (matchesKey(data, Key.escape)) this.#lastEscapeAt = Date.now()
+      return undefined
+    })
+    options.permissionBroker?.setHandler((request) => this.#requestPermission(request))
+  }
+
+  start(): void {
+    this.#tui.start()
+  }
+
+  async stop(): Promise<void> {
+    await this.#controller.close()
+    this.#tui.stop()
+    this.#resolveStopped()
+  }
+
+  waitUntilStopped(): Promise<void> {
+    return this.#stopped
+  }
+
+  async submit(text: string): Promise<void> {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    if (trimmed === '/exit') {
+      await this.stop()
+      return
+    }
+    if (this.#busy) {
+      this.#queue.push(trimmed)
+      this.#status.setText(
+        `${this.#controller.permissionMode ?? 'default'} · working · ${this.#queue.length} queued`,
+      )
+      this.#tui.requestRender()
+      return
+    }
+    if (trimmed === '/clear') {
+      await this.#sessionCommands?.clear()
+      this.#clearTranscript()
+      return
+    }
+    if (trimmed === '/context') {
+      this.#insertTranscript(new Text(this.#controller.contextSummary?.() ?? 'Unavailable', 1, 0))
+      this.#tui.requestRender()
+      return
+    }
+    if (trimmed.startsWith('/compact')) {
+      await this.#controller.compact?.(trimmed.slice('/compact'.length).trim() || undefined)
+      this.#insertTranscript(new Text('Conversation compacted', 1, 0))
+      this.#tui.requestRender()
+      return
+    }
+    if (trimmed.startsWith('/rename ')) {
+      await this.#controller.rename?.(trimmed.slice('/rename '.length).trim())
+      this.#insertTranscript(new Text('Session renamed', 1, 0))
+      this.#tui.requestRender()
+      return
+    }
+    if (trimmed === '/permissions') {
+      await this.#selectPermissionMode()
+      return
+    }
+    if (trimmed === '/rewind') {
+      await this.#selectRewindPoint()
+      return
+    }
+    if (trimmed === '/resume' || trimmed.startsWith('/resume ')) {
+      await this.#resumeSession(trimmed.slice('/resume'.length).trim())
+      return
+    }
+    if (trimmed === '/branch' || trimmed.startsWith('/branch ')) {
+      await this.#sessionCommands?.branch(trimmed.slice('/branch'.length).trim() || undefined)
+      this.#renderControllerHistory()
+      return
+    }
+    if (trimmed.startsWith('/model ')) {
+      await this.#sessionCommands?.setModel(trimmed.slice('/model '.length).trim())
+      this.#renderControllerHistory()
+      return
+    }
+    this.#busy = true
+    this.#editor.disableSubmit = true
+    this.#insertTranscript(new Markdown(`**You**\n\n${trimmed}`, 1, 0, markdownTheme))
+    this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · working`)
+    let assistant: Markdown | undefined
+    let assistantText = ''
+
+    try {
+      for await (const event of this.#controller.submit(trimmed)) {
+        if (
+          event.type === 'model_stream' &&
+          event.event.type === 'content_block_delta' &&
+          event.event.delta.type === 'text_delta'
+        ) {
+          assistantText += event.event.delta.text
+          if (!assistant) {
+            assistant = new Markdown('', 1, 0, markdownTheme)
+            this.#insertTranscript(assistant)
+          }
+          assistant.setText(`**Dock**\n\n${assistantText}`)
+        } else if (event.type === 'tool_execution_start') {
+          this.#insertTranscript(new Text(`● ${event.toolUse.name}`, 1, 0))
+        } else if (event.type === 'tool_result' && event.result.isError) {
+          this.#insertTranscript(new Text(`  Error: ${event.result.content}`, 1, 0))
+        } else if (event.type === 'compact') {
+          this.#insertTranscript(new Text('  Conversation compacted', 1, 0))
+        }
+        this.#tui.requestRender()
+      }
+    } catch (error) {
+      this.#insertTranscript(
+        new Text(`Error: ${error instanceof Error ? error.message : String(error)}`, 1, 0),
+      )
+    } finally {
+      this.#busy = false
+      this.#editor.disableSubmit = false
+      this.#setReadyStatus()
+      this.#tui.requestRender()
+    }
+
+    const queued = this.#queue.shift()
+    if (queued) await this.submit(queued)
+  }
+
+  #insertTranscript(component: Markdown | Text): void {
+    this.#tui.children.splice(this.#tui.children.length - 2, 0, component)
+  }
+
+  #clearTranscript(): void {
+    this.#tui.children.splice(2, Math.max(0, this.#tui.children.length - 4))
+    this.#tui.requestRender(true)
+  }
+
+  async #requestPermission(request: PermissionRequest): Promise<boolean> {
+    this.#status.setText(`Permission required · ${request.tool.name}`)
+    this.#tui.requestRender()
+    return new Promise<boolean>((resolve) => {
+      const list = new SelectList(
+        [
+          { description: 'Run this tool call', label: 'Yes', value: 'yes' },
+          { description: 'Return a denial to the model', label: 'No', value: 'no' },
+        ],
+        2,
+        selectListTheme,
+      )
+      const overlay = this.#tui.showOverlay(list, { anchor: 'bottom-center', width: '70%' })
+      const finish = (approved: boolean) => {
+        overlay.hide()
+        this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · working`)
+        this.#tui.requestRender(true)
+        resolve(approved)
+      }
+      list.onSelect = (item) => finish(item.value === 'yes')
+      list.onCancel = () => finish(false)
+    })
+  }
+
+  async #selectPermissionMode(): Promise<void> {
+    if (!this.#controller.setPermissionMode) return
+    const values = [...this.#permissionCycle]
+    if (this.#controller.permissionMode === 'dontAsk') values.push('dontAsk')
+    const selected = await this.#select(
+      values.map((value) => ({ description: '', label: value, value })),
+    )
+    if (!selected) return
+    this.#controller.setPermissionMode(selected as PermissionMode)
+    this.#setReadyStatus()
+  }
+
+  #cyclePermissionMode(): void {
+    if (!this.#controller.setPermissionMode) return
+    const current = this.#controller.permissionMode ?? 'default'
+    const next =
+      this.#permissionCycle[
+        (this.#permissionCycle.indexOf(current as PermissionMode) + 1) %
+          this.#permissionCycle.length
+      ] ?? 'default'
+    this.#controller.setPermissionMode(next)
+    this.#setReadyStatus()
+    this.#tui.requestRender()
+  }
+
+  #setReadyStatus(): void {
+    this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · ready`)
+  }
+
+  async #selectRewindPoint(): Promise<void> {
+    if (!this.#controller.rewind || !this.#controller.rewindPoints) return
+    const points = this.#controller.rewindPoints()
+    const selected = await this.#select(
+      points.map((point) => ({ description: '', label: point.label, value: point.uuid })),
+    )
+    const point = points.find((candidate) => candidate.uuid === selected)
+    if (!point) return
+    await this.#controller.rewind(point.uuid, { conversation: true, files: true })
+    this.#insertTranscript(new Text(`Rewound to: ${point.label}`, 1, 0))
+    this.#tui.requestRender(true)
+  }
+
+  async #resumeSession(value: string): Promise<void> {
+    if (!this.#sessionCommands) return
+    let selected = value
+    if (!selected) {
+      const sessions = await this.#sessionCommands.listSessions()
+      selected =
+        (await this.#select(sessions.map((session) => ({ ...session, description: '' })))) ?? ''
+    }
+    if (!selected) return
+    await this.#sessionCommands.resume(selected)
+    this.#renderControllerHistory()
+  }
+
+  #renderControllerHistory(): void {
+    this.#clearTranscript()
+    for (const entry of this.#controller.messages ?? []) {
+      const text = entry.message.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n')
+      if (!text) continue
+      this.#insertTranscript(
+        new Markdown(
+          `**${entry.type === 'user' ? 'You' : 'Dock'}**\n\n${text}`,
+          1,
+          0,
+          markdownTheme,
+        ),
+      )
+    }
+    this.#tui.requestRender(true)
+  }
+
+  async #select(
+    items: Array<{ description: string; label: string; value: string }>,
+  ): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      const list = new SelectList(items, Math.min(items.length, 10), selectListTheme)
+      const overlay = this.#tui.showOverlay(list, { anchor: 'bottom-center', width: '70%' })
+      const finish = (value?: string) => {
+        overlay.hide()
+        this.#tui.requestRender(true)
+        resolve(value)
+      }
+      list.onSelect = (item) => finish(item.value)
+      list.onCancel = () => finish()
+    })
+  }
+}

@@ -362,4 +362,30 @@ describe('runAgentLoop', () => {
       content: [{ type: 'text', text: 'compact summary' }],
     })
   })
+
+  it('prepends project instructions as ephemeral user context', async () => {
+    const model = new FakeModelAdapter([textResponse('done')])
+
+    const { result } = await drain(
+      runAgentLoop({
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'work' }] })],
+        model,
+        modelId: 'test-model',
+        systemPrompt: [],
+        tools: [],
+        userContext: { AGENTS: 'Always run tests.' },
+      }),
+    )
+
+    expect(model.requests[0]?.messages[0]).toMatchObject({
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: expect.stringContaining('Always run tests.'),
+        },
+      ],
+    })
+    expect(result.messages).toHaveLength(2)
+  })
 })

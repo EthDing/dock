@@ -161,4 +161,42 @@ describe('session store', () => {
     expect(loaded.fileHistorySnapshots).toHaveLength(1)
     expect(loaded.fileHistorySnapshots[0]).toMatchObject({ messageId: MESSAGE_ONE })
   })
+
+  it('restores only summary, preserved tail, and new messages after compact', async () => {
+    const configDir = await mkdtemp(join(tmpdir(), 'dock-session-compact-'))
+    const cwd = '/work/project'
+    const sessionId = asSessionId('10000000-0000-4000-8000-000000000007')
+    const writer = await SessionWriter.create({ configDir, cwd, sessionId })
+    const old = createUserMessage(
+      { content: [{ type: 'text', text: 'old' }] },
+      { uuid: MESSAGE_ONE },
+    )
+    const preserved = createUserMessage(
+      { content: [{ type: 'text', text: 'preserved' }] },
+      { uuid: MESSAGE_TWO },
+    )
+    const summary = createUserMessage(
+      { content: [{ type: 'text', text: 'summary' }] },
+      { isCompactSummary: true, uuid: MESSAGE_THREE },
+    )
+    const after = createUserMessage(
+      { content: [{ type: 'text', text: 'after' }] },
+      { uuid: asMessageUuid('20000000-0000-4000-8000-000000000004') },
+    )
+    await writer.recordTranscript([old, preserved])
+    await writer.recordCompaction([summary, preserved])
+    await writer.recordTranscript([after])
+    await writer.close()
+
+    const loaded = await loadSession({ configDir, cwd, sessionId })
+
+    expect(
+      loaded.messages.map((message) =>
+        message.message.content
+          .filter((block) => block.type === 'text')
+          .map((block) => block.text)
+          .join(''),
+      ),
+    ).toEqual(['summary', 'preserved', 'after'])
+  })
 })

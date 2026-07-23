@@ -4,6 +4,7 @@ import type {
   AssistantMessage,
   JsonObject,
   ModelAdapter,
+  ModelMessage,
   ModelRequest,
   ModelStreamEvent,
   StopReason,
@@ -29,6 +30,7 @@ export type AgentLoopOptions = {
   tools: readonly AgentTool[]
   signal?: AbortSignal
   maxTurns?: number
+  userContext?: Readonly<Record<string, string>>
 }
 
 export type AgentEvent =
@@ -79,7 +81,10 @@ export async function* runAgentLoop(
         if (prepared.compacted) yield { messages: [...messages], type: 'compact' }
       }
       const request: ModelRequest = {
-        messages: messages.map((message) => message.message),
+        messages: [
+          ...buildUserContextMessages(options.userContext),
+          ...messages.map((message) => message.message),
+        ],
         modelId: options.modelId,
         systemPrompt: options.systemPrompt,
         tools: toolDefinitions,
@@ -254,6 +259,26 @@ export async function* runAgentLoop(
 
 function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function buildUserContextMessages(
+  context: Readonly<Record<string, string>> | undefined,
+): ModelMessage[] {
+  if (!context || Object.keys(context).length === 0) return []
+  const content = Object.entries(context)
+    .map(([key, value]) => `# ${key}\n${value}`)
+    .join('\n')
+  return [
+    {
+      content: [
+        {
+          text: `<system-reminder>\nAs you answer the user's questions, you can use the following context:\n${content}\n\nIMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>`,
+          type: 'text',
+        },
+      ],
+      role: 'user',
+    },
+  ]
 }
 
 function parseToolInput(toolName: string, partialJson: string): JsonObject {

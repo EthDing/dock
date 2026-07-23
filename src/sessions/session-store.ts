@@ -47,12 +47,20 @@ export type FileHistorySnapshotRecord = {
   }
 }
 
+export type SessionCompactRecord = {
+  type: 'compact_boundary'
+  preservedUuids: UUID[]
+  summaryUuid: UUID
+  timestamp: string
+}
+
 export type SessionRecord =
   | SessionMetadataRecord
   | SessionMessageRecord
   | SessionNameRecord
   | SessionRewindRecord
   | FileHistorySnapshotRecord
+  | SessionCompactRecord
 
 export type LoadedSession = {
   fileHistorySnapshots: readonly FileHistorySnapshot[]
@@ -236,6 +244,31 @@ export class SessionWriter {
     })
   }
 
+  async recordCompaction(messages: readonly TranscriptMessage[]): Promise<void> {
+    this.#assertOpen()
+    const [summary, ...preserved] = messages
+    if (summary?.type !== 'user' || !summary.isCompactSummary) {
+      throw new Error('Compaction must begin with a compact summary message')
+    }
+    if (!this.#messageUuids.has(summary.uuid)) {
+      await appendAndSync(this.#file, {
+        parentUuid: null,
+        ...summary,
+        cwd: this.#cwd,
+        sessionId: this.#sessionId,
+      })
+      this.#messageUuids.add(summary.uuid)
+    }
+    const preservedUuids = preserved.map((message) => message.uuid)
+    await appendAndSync(this.#file, {
+      preservedUuids,
+      summaryUuid: summary.uuid,
+      timestamp: this.#now().toISOString(),
+      type: 'compact_boundary',
+    })
+    this.#headUuid = preservedUuids.at(-1) ?? summary.uuid
+  }
+
   async close(): Promise<void> {
     if (this.#closed) return
     this.#closed = true
@@ -415,6 +448,18 @@ function parseSessionRecord(value: unknown, path: string, line: number): Session
     }
     return value as FileHistorySnapshotRecord
   }
+  if (value.type === 'compact_boundary') {
+    if (
+      typeof value.summaryUuid !== 'string' ||
+      !isUuid(value.summaryUuid) ||
+      !Array.isArray(value.preservedUuids) ||
+      !value.preservedUuids.every((uuid) => typeof uuid === 'string' && isUuid(uuid)) ||
+      typeof value.timestamp !== 'string'
+    ) {
+      throw new Error(`Invalid compact_boundary record at ${path}:${line}`)
+    }
+    return value as SessionCompactRecord
+  }
   throw new Error(`Unknown session record type ${value.type} at ${path}:${line}`)
 }
 
@@ -428,12 +473,16 @@ function buildActiveConversation(records: readonly SessionRecord[]): {
 } {
   const messagesByUuid = new Map<UUID, SessionMessageRecord>()
   let headUuid: UUID | null = null
+  let compactBoundary: SessionCompactRecord | undefined
   for (const record of records) {
     if (isSessionMessageRecord(record)) {
       messagesByUuid.set(record.uuid, record)
       headUuid = record.uuid
     } else if (record.type === 'rewind') {
       headUuid = record.targetUuid
+    } else if (record.type === 'compact_boundary') {
+      compactBoundary = record
+      headUuid = record.preservedUuids.at(-1) ?? record.summaryUuid
     }
   }
 
@@ -449,11 +498,25 @@ function buildActiveConversation(records: readonly SessionRecord[]): {
     current = message.parentUuid
   }
 
+  let activeChain = chain.reverse()
+  if (compactBoundary) {
+    const baseUuids = [compactBoundary.summaryUuid, ...compactBoundary.preservedUuids]
+    const base = baseUuids.map((uuid) => {
+      const message = messagesByUuid.get(uuid)
+      if (!message) throw new Error(`Missing compacted message ${uuid}`)
+      return message
+    })
+    const baseHead = baseUuids.at(-1)
+    const baseHeadIndex = activeChain.findIndex((message) => message.uuid === baseHead)
+    const suffix = baseHeadIndex >= 0 ? activeChain.slice(baseHeadIndex + 1) : []
+    activeChain = [...base, ...suffix]
+  }
+
   return {
     headUuid,
-    messages: chain
-      .reverse()
-      .map(({ parentUuid: _parentUuid, sessionId: _sessionId, cwd: _cwd, ...message }) => message),
+    messages: activeChain.map(
+      ({ parentUuid: _parentUuid, sessionId: _sessionId, cwd: _cwd, ...message }) => message,
+    ),
   }
 }
 

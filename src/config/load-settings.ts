@@ -12,6 +12,8 @@ const providerSettingsSchema = z
   .object({
     apiKeyEnv: z.string().min(1).optional(),
     baseUrl: z.url().optional(),
+    contextWindow: z.number().int().positive().optional(),
+    maxOutputTokens: z.number().int().positive().optional(),
     protocol: providerProtocolSchema.optional(),
   })
   .strict()

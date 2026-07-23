@@ -8,7 +8,7 @@ import {
 } from './evaluate-permission.js'
 
 export function createCanUseTool(options: {
-  mode: PermissionMode
+  mode: PermissionMode | (() => PermissionMode)
   requestApproval: (
     tool: AgentTool,
     input: JsonObject,
@@ -24,7 +24,7 @@ export function createCanUseTool(options: {
       requiresBypassConfirmation: false,
     }
     const decision = evaluatePermission({
-      mode: options.mode,
+      mode: typeof options.mode === 'function' ? options.mode() : options.mode,
       rules: options.rules,
       subject,
     })
