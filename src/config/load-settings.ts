@@ -126,7 +126,7 @@ function mergeProviders(
   return providers
 }
 
-async function readSettingsFile(path: string): Promise<DockSettings | undefined> {
+export async function readSettingsFile(path: string): Promise<DockSettings | undefined> {
   let contents: string
   try {
     contents = await readFile(path, 'utf8')

@@ -1,10 +1,16 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { ProcessTerminal, TuiMainScreen } from '@dock/tui'
+import { ProcessTerminal, TuiMainScreen, type Terminal } from '@dock/tui'
 import { runAgentLoop } from './agent/run-agent-loop.js'
 import { FileHistory } from './checkpoint/file-history.js'
 import { ContextManager } from './context/context-manager.js'
 import { loadInstructionDocuments } from './context/load-instructions.js'
+import {
+  type FirstRunResult,
+  type OnboardingPrompter,
+  runFirstRunOnboarding,
+  runInteractiveFirstRunOnboarding,
+} from './config/first-run.js'
 import { loadSettings, type ProviderSettings } from './config/load-settings.js'
 import { createUserMessage } from './messages/create-message.js'
 import { createModelAdapter } from './model/create-model-adapter.js'
@@ -29,6 +35,8 @@ export type StartDockOptions = {
   cwd?: string
   environment?: Record<string, string | undefined>
   homeDir?: string
+  onboardingPrompter?: OnboardingPrompter
+  terminal?: Terminal
 }
 
 export async function startDock(options: StartDockOptions): Promise<void> {
@@ -37,12 +45,30 @@ export async function startDock(options: StartDockOptions): Promise<void> {
   const environment = options.environment ?? process.env
   const configDir = join(homeDir, '.dock')
   const cli = parseCliOptions(options.args)
-  const loadedSettings = await loadSettings({ cwd, homeDir })
-  const initialModelReference = cli.model ?? loadedSettings.settings.model
+  let loadedSettings = await loadSettings({ cwd, homeDir })
+  let initialModelReference = cli.model ?? loadedSettings.settings.model
+  let firstRunResult: FirstRunResult | undefined
   if (!initialModelReference) {
-    throw new Error(
-      'No model configured. Set "model" to "<provider>:<model-id>" in ~/.dock/settings.json.',
-    )
+    if (options.onboardingPrompter) {
+      firstRunResult = await runFirstRunOnboarding({
+        homeDir,
+        prompter: options.onboardingPrompter,
+      })
+    } else if (process.stdin.isTTY && process.stdout.isTTY) {
+      firstRunResult = await runInteractiveFirstRunOnboarding({ homeDir })
+    } else {
+      throw new Error(
+        'No model configured and first-run setup requires an interactive terminal. Run dock in a terminal.',
+      )
+    }
+    loadedSettings = await loadSettings({ cwd, homeDir })
+    initialModelReference = loadedSettings.settings.model
+    if (!initialModelReference) throw new Error('First-run setup did not configure a model')
+    if (!environment[firstRunResult.apiKeyEnvironmentVariable]) {
+      throw new Error(
+        `Configuration saved. Set ${firstRunResult.apiKeyEnvironmentVariable} in this shell and run dock again.`,
+      )
+    }
   }
 
   let sessionId = await resolveSessionId({
@@ -192,7 +218,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       currentModelReference = reference
     },
   }
-  const tui = new TuiMainScreen(new ProcessTerminal())
+  const tui = new TuiMainScreen(options.terminal ?? new ProcessTerminal())
   const app = new DockTuiApp({
     controller: runtime,
     permissionBroker,

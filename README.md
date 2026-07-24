@@ -13,9 +13,24 @@ pnpm install
 pnpm run ci
 ```
 
-## Configuration
+## First run
 
-Create `~/.dock/settings.json`:
+Build and start Dock inside WSL:
+
+```bash
+pnpm build
+node dist/cli.js
+```
+
+If no model is configured, Dock opens a first-run setup flow before the main TUI. It asks for
+the provider protocol, provider name, model ID, optional base URL, and the name of the API-key
+environment variable. Dock creates `~/.dock/settings.json` with owner-only permissions and never
+writes the API key itself. If the selected environment variable is not set yet, export it in the
+same WSL shell and start Dock again.
+
+## Manual configuration
+
+To configure Dock without the first-run flow, create `~/.dock/settings.json`:
 
 ```json
 {
@@ -40,13 +55,6 @@ Create `~/.dock/settings.json`:
 Supported provider protocols are `anthropic-messages`, `openai-responses`, and
 `openai-chat-completions`. API keys are read only from the configured environment variable.
 Use a custom `baseUrl` and `apiKeyEnv` on a provider for OpenAI-compatible endpoints.
-
-Build and start Dock:
-
-```bash
-pnpm build
-node dist/cli.js
-```
 
 Startup session flags include `--continue`, `--resume <id|name>`, `--fork-session`, `--model`,
 `--name`, and `--permission-mode`.
