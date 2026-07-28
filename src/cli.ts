@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { pathToFileURL } from 'node:url'
+import { realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
 export const DOCK_VERSION = '0.0.0'
 
@@ -30,6 +31,18 @@ export async function runCli(args: readonly string[], io: CliIo = defaultIo): Pr
 }
 
 const entrypoint = process.argv[1]
-if (entrypoint && import.meta.url === pathToFileURL(entrypoint).href) {
+if (entrypoint && isEntrypoint(import.meta.url, entrypoint)) {
   process.exitCode = await runCli(process.argv.slice(2))
+}
+
+export function isEntrypoint(moduleUrl: string, executablePath: string): boolean {
+  try {
+    const modulePath = realpathSync(fileURLToPath(moduleUrl))
+    const invokedPath = realpathSync(executablePath)
+    return process.platform === 'win32'
+      ? modulePath.toLowerCase() === invokedPath.toLowerCase()
+      : modulePath === invokedPath
+  } catch {
+    return false
+  }
 }
