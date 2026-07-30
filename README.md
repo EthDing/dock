@@ -24,9 +24,9 @@ node dist/cli.js
 
 If no model is configured, Dock opens a first-run setup flow before the main TUI. It asks for
 the provider protocol, provider name, model ID, optional base URL, and the name of the API-key
-environment variable. Dock creates `~/.dock/settings.json` with owner-only permissions and never
-writes the API key itself. If the selected environment variable is not set yet, export it in the
-same WSL shell and start Dock again.
+environment variable. If no credential is already available, Dock asks for the key with masked
+input and stores it in `~/.dock/.credentials.json` with file mode `0600`. Later launches need only
+the `dock` command. A configured environment variable overrides the stored credential.
 
 ## Manual configuration
 
@@ -53,7 +53,8 @@ To configure Dock without the first-run flow, create `~/.dock/settings.json`:
 ```
 
 Supported provider protocols are `anthropic-messages`, `openai-responses`, and
-`openai-chat-completions`. API keys are read only from the configured environment variable.
+`openai-chat-completions`. API keys use an environment override when present and otherwise come
+from the owner-only credential store.
 Use a custom `baseUrl` and `apiKeyEnv` on a provider for OpenAI-compatible endpoints.
 
 Startup session flags include `--continue`, `--resume <id|name>`, `--fork-session`, `--model`,

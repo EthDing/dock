@@ -74,9 +74,41 @@ describe('startDock', () => {
           select: async () => 'anthropic-messages',
         },
       }),
-    ).rejects.toThrow('Configuration saved. Set ANTHROPIC_API_KEY')
+    ).rejects.toThrow('Configuration saved. Run dock in an interactive terminal')
     await expect(readFile(join(homeDir, '.dock', 'settings.json'), 'utf8')).resolves.toContain(
       'anthropic:claude-test-model',
     )
+  })
+
+  it('stores a prompted credential so later launches need only dock', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dock-start-'))
+    const homeDir = join(root, 'home')
+    const inputs = ['', 'claude-test-model', '', '']
+
+    await startDock({
+      args: [],
+      credentialPrompter: async () => 'stored-test-key',
+      cwd: root,
+      environment: {},
+      homeDir,
+      onboardingPrompter: {
+        input: async () => inputs.shift() ?? '',
+        select: async () => 'anthropic-messages',
+      },
+      terminal: new ExitTerminal(),
+    })
+
+    await expect(readFile(join(homeDir, '.dock', '.credentials.json'), 'utf8')).resolves.toContain(
+      'stored-test-key',
+    )
+    await expect(
+      startDock({
+        args: [],
+        cwd: root,
+        environment: {},
+        homeDir,
+        terminal: new ExitTerminal(),
+      }),
+    ).resolves.toBeUndefined()
   })
 })

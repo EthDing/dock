@@ -24,4 +24,14 @@ describe('createModelAdapter', () => {
       createModelAdapter({ apiKeyEnv: 'MISSING_KEY', protocol: 'anthropic-messages' }, {}),
     ).toThrow('MISSING_KEY')
   })
+
+  it('uses a stored provider credential when no environment override exists', () => {
+    expect(
+      createModelAdapter(
+        { apiKeyEnv: 'MISSING_KEY', protocol: 'openai-responses' },
+        {},
+        'stored-secret',
+      ),
+    ).toBeInstanceOf(OpenAIResponsesAdapter)
+  })
 })

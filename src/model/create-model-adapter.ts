@@ -9,9 +9,10 @@ import { OpenAIResponsesAdapter } from './openai-responses-adapter.js'
 export function createModelAdapter(
   settings: ProviderSettings & { protocol: ProviderProtocol },
   environment: Record<string, string | undefined> = process.env,
+  storedApiKey?: string,
 ): ModelAdapter {
-  const keyName = settings.apiKeyEnv ?? defaultApiKeyEnvironment(settings.protocol)
-  const apiKey = environment[keyName]
+  const keyName = getApiKeyEnvironmentName(settings)
+  const apiKey = environment[keyName] ?? storedApiKey
   if (!apiKey) throw new Error(`Missing API key environment variable ${keyName}`)
 
   if (settings.protocol === 'anthropic-messages') {
@@ -31,6 +32,11 @@ export function createModelAdapter(
     : new OpenAIChatAdapter(client as never)
 }
 
-function defaultApiKeyEnvironment(protocol: ProviderProtocol): string {
-  return protocol === 'anthropic-messages' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'
+export function getApiKeyEnvironmentName(
+  settings: ProviderSettings & { protocol: ProviderProtocol },
+): string {
+  return (
+    settings.apiKeyEnv ??
+    (settings.protocol === 'anthropic-messages' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY')
+  )
 }

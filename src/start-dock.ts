@@ -6,6 +6,11 @@ import { FileHistory } from './checkpoint/file-history.js'
 import { ContextManager } from './context/context-manager.js'
 import { loadInstructionDocuments } from './context/load-instructions.js'
 import {
+  loadProviderCredential,
+  promptForProviderCredential,
+  saveProviderCredential,
+} from './config/credentials.js'
+import {
   type FirstRunResult,
   type OnboardingPrompter,
   runFirstRunOnboarding,
@@ -13,7 +18,7 @@ import {
 } from './config/first-run.js'
 import { loadSettings, type ProviderSettings } from './config/load-settings.js'
 import { createUserMessage } from './messages/create-message.js'
-import { createModelAdapter } from './model/create-model-adapter.js'
+import { createModelAdapter, getApiKeyEnvironmentName } from './model/create-model-adapter.js'
 import type { ModelAdapter } from './model/types.js'
 import { createCanUseTool } from './permissions/can-use-tool.js'
 import { PermissionBroker } from './permissions/permission-broker.js'
@@ -33,6 +38,7 @@ import { RuntimeController } from './ui/runtime-controller.js'
 export type StartDockOptions = {
   args: readonly string[]
   cwd?: string
+  credentialPrompter?: (message: string) => Promise<string>
   environment?: Record<string, string | undefined>
   homeDir?: string
   onboardingPrompter?: OnboardingPrompter
@@ -64,11 +70,51 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     loadedSettings = await loadSettings({ cwd, homeDir })
     initialModelReference = loadedSettings.settings.model
     if (!initialModelReference) throw new Error('First-run setup did not configure a model')
-    if (!environment[firstRunResult.apiKeyEnvironmentVariable]) {
+  }
+
+  const { providerName: initialProviderName } = parseModelReference(initialModelReference)
+  const initialProvider = loadedSettings.settings.providers?.[initialProviderName]
+  if (!initialProvider?.protocol) {
+    throw new Error(`Provider ${initialProviderName} is missing a protocol`)
+  }
+  const initialConfiguredProvider = initialProvider as ProviderSettings & {
+    protocol: NonNullable<ProviderSettings['protocol']>
+  }
+  const apiKeyEnvironmentVariable = getApiKeyEnvironmentName(initialConfiguredProvider)
+  let storedApiKey = await loadProviderCredential({
+    homeDir,
+    providerName: initialProviderName,
+  })
+  const environmentApiKey = environment[apiKeyEnvironmentVariable]
+  if (!storedApiKey && environmentApiKey && firstRunResult) {
+    await saveProviderCredential({
+      apiKey: environmentApiKey,
+      homeDir,
+      providerName: initialProviderName,
+    })
+    storedApiKey = environmentApiKey
+  }
+  if (!storedApiKey && !environmentApiKey) {
+    if (options.credentialPrompter) {
+      storedApiKey = await options.credentialPrompter(`API key for ${initialProviderName}: `)
+    } else if (process.stdin.isTTY && process.stdout.isTTY) {
+      storedApiKey = await promptForProviderCredential({
+        message: `API key for ${initialProviderName}: `,
+      })
+    } else if (firstRunResult) {
       throw new Error(
-        `Configuration saved. Set ${firstRunResult.apiKeyEnvironmentVariable} in this shell and run dock again.`,
+        `Configuration saved. Run dock in an interactive terminal to store ${apiKeyEnvironmentVariable}.`,
+      )
+    } else {
+      throw new Error(
+        `No credential found for ${initialProviderName}. Run dock in an interactive terminal.`,
       )
     }
+    await saveProviderCredential({
+      apiKey: storedApiKey,
+      homeDir,
+      providerName: initialProviderName,
+    })
   }
 
   let sessionId = await resolveSessionId({
@@ -119,10 +165,13 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     modelReference: string,
     name?: string,
   ): Promise<SessionController> => {
+    const { providerName } = parseModelReference(modelReference)
+    const providerCredential = await loadProviderCredential({ homeDir, providerName })
     const { model, modelId, provider } = createConfiguredModel(
       modelReference,
       loadedSettings.settings.providers,
       environment,
+      providerCredential,
     )
     const existing = await tryLoadSession({ configDir, cwd, sessionId: targetSessionId })
     const writer = existing
@@ -233,6 +282,7 @@ function createConfiguredModel(
   modelReference: string,
   providers: Record<string, ProviderSettings> | undefined,
   environment: Record<string, string | undefined>,
+  storedApiKey?: string,
 ): { model: ModelAdapter; modelId: string; provider: ProviderSettings } {
   const { modelId, providerName } = parseModelReference(modelReference)
   const provider = providers?.[providerName]
@@ -241,7 +291,7 @@ function createConfiguredModel(
     protocol: NonNullable<ProviderSettings['protocol']>
   }
   return {
-    model: createModelAdapter(configuredProvider, environment),
+    model: createModelAdapter(configuredProvider, environment, storedApiKey),
     modelId,
     provider: configuredProvider,
   }
