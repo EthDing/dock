@@ -17,6 +17,7 @@ import {
   runInteractiveFirstRunOnboarding,
 } from './config/first-run.js'
 import { loadSettings, type ProviderSettings } from './config/load-settings.js'
+import { addLocalPermissionRule } from './config/write-settings.js'
 import { createUserMessage } from './messages/create-message.js'
 import { createModelAdapter, getApiKeyEnvironmentName } from './model/create-model-adapter.js'
 import type { ModelAdapter } from './model/types.js'
@@ -25,6 +26,12 @@ import { PermissionBroker } from './permissions/permission-broker.js'
 import type { PermissionMode } from './permissions/evaluate-permission.js'
 import { PermissionModeState } from './permissions/permission-mode-state.js'
 import { SessionController } from './session-controller.js'
+import {
+  createSandboxRuntimeConfig,
+  DockSandbox,
+  type SandboxManagerApi,
+} from './sandbox/dock-sandbox.js'
+import { SandboxNetworkPermissionBroker } from './sandbox/network-permission-broker.js'
 import { createSessionId, asSessionId, type SessionId } from './sessions/ids.js'
 import { findMostRecentSession, forkSession, listSessions } from './sessions/session-manager.js'
 import { loadSession, SessionWriter } from './sessions/session-store.js'
@@ -42,6 +49,7 @@ export type StartDockOptions = {
   environment?: Record<string, string | undefined>
   homeDir?: string
   onboardingPrompter?: OnboardingPrompter
+  sandboxManager?: SandboxManagerApi
   terminal?: Terminal
 }
 
@@ -117,6 +125,28 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     })
   }
 
+  const sandboxNetworkPermissionBroker = new SandboxNetworkPermissionBroker()
+  const sandbox = new DockSandbox({
+    config: createSandboxRuntimeConfig({ cwd, homeDir, settings: loadedSettings.settings }),
+    ...(options.sandboxManager ? { manager: options.sandboxManager } : {}),
+    settings: loadedSettings.settings.sandbox ?? {},
+  })
+  await sandbox.initialize(async ({ host, port }) => {
+    const response = await sandboxNetworkPermissionBroker.request({ host, port })
+    if (response.allow && response.persist) {
+      await addLocalPermissionRule({
+        behavior: 'allow',
+        projectRoot: loadedSettings.projectRoot,
+        rule: `WebFetch(domain:${host})`,
+      })
+      loadedSettings = await loadSettings({ cwd, homeDir })
+      sandbox.updateConfig(
+        createSandboxRuntimeConfig({ cwd, homeDir, settings: loadedSettings.settings }),
+      )
+    }
+    return response.allow
+  })
+
   let sessionId = await resolveSessionId({
     configDir,
     continueSession: cli.continueSession,
@@ -150,6 +180,14 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     cli.permissionMode ?? loadedSettings.settings.permissions?.defaultMode ?? 'default'
   const permissionModeState = new PermissionModeState(permissionMode)
   const canUseTool = createCanUseTool({
+    autoAllowBashIfSandboxed: () => sandbox.autoAllowBashIfSandboxed,
+    isBashSandboxed: (_tool, input) =>
+      sandbox.shouldUseSandbox({
+        ...(typeof input.command === 'string' ? { command: input.command } : {}),
+        ...(typeof input.dangerouslyDisableSandbox === 'boolean'
+          ? { dangerouslyDisableSandbox: input.dangerouslyDisableSandbox }
+          : {}),
+      }),
     mode: () => permissionModeState.value,
     requestApproval: (tool, input, decision, signal) =>
       permissionBroker.requestApproval(tool, input, decision, signal),
@@ -194,7 +232,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       createEditTool(fileDependencies),
       createGlobTool({ cwd }),
       createGrepTool({ cwd }),
-      createBashTool({ cwd, homeDir }),
+      createBashTool({ cwd, homeDir, sandbox }),
     ]
     const contextManager = new ContextManager({
       contextWindow: provider.contextWindow ?? 200_000,
@@ -271,11 +309,17 @@ export async function startDock(options: StartDockOptions): Promise<void> {
   const app = new DockTuiApp({
     controller: runtime,
     permissionBroker,
+    sandboxNetworkPermissionBroker,
     sessionCommands,
+    startupNotices: sandbox.unavailableReason ? [sandbox.unavailableReason] : [],
     tui,
   })
   app.start()
-  await app.waitUntilStopped()
+  try {
+    await app.waitUntilStopped()
+  } finally {
+    await sandbox.reset()
+  }
 }
 
 function createConfiguredModel(

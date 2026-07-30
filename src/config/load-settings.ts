@@ -29,6 +29,36 @@ const permissionModeSchema = z.enum([
   'bypassPermissions',
 ])
 
+const sandboxFilesystemSchema = z
+  .object({
+    allowRead: z.array(z.string()).optional(),
+    allowWrite: z.array(z.string()).optional(),
+    denyRead: z.array(z.string()).optional(),
+    denyWrite: z.array(z.string()).optional(),
+  })
+  .strict()
+
+const sandboxNetworkSchema = z
+  .object({
+    allowLocalBinding: z.boolean().optional(),
+    allowUnixSockets: z.array(z.string()).optional(),
+    allowedDomains: z.array(z.string()).optional(),
+    deniedDomains: z.array(z.string()).optional(),
+  })
+  .strict()
+
+const sandboxSettingsSchema = z
+  .object({
+    allowUnsandboxedCommands: z.boolean().optional(),
+    autoAllowBashIfSandboxed: z.boolean().optional(),
+    enabled: z.boolean().optional(),
+    excludedCommands: z.array(z.string()).optional(),
+    failIfUnavailable: z.boolean().optional(),
+    filesystem: sandboxFilesystemSchema.optional(),
+    network: sandboxNetworkSchema.optional(),
+  })
+  .strict()
+
 const settingsSchema = z
   .object({
     cleanupPeriodDays: z.number().int().nonnegative().optional(),
@@ -43,6 +73,7 @@ const settingsSchema = z
       .strict()
       .optional(),
     providers: z.record(z.string(), providerSettingsSchema).optional(),
+    sandbox: sandboxSettingsSchema.optional(),
   })
   .strict()
 
@@ -91,13 +122,68 @@ export async function findProjectRoot(cwd: string): Promise<string> {
 function mergeSettings(base: DockSettings, override: DockSettings): DockSettings {
   const permissions = mergePermissions(base.permissions, override.permissions)
   const providers = mergeProviders(base.providers, override.providers)
+  const sandbox = mergeSandbox(base.sandbox, override.sandbox)
 
   return {
     ...base,
     ...override,
     ...(permissions ? { permissions } : {}),
     ...(providers ? { providers } : {}),
+    ...(sandbox ? { sandbox } : {}),
   }
+}
+
+function mergeSandbox(
+  base: DockSettings['sandbox'],
+  override: DockSettings['sandbox'],
+): DockSettings['sandbox'] {
+  if (!base && !override) return undefined
+  const filesystem = mergeSandboxFilesystem(base?.filesystem, override?.filesystem)
+  const network = mergeSandboxNetwork(base?.network, override?.network)
+  return {
+    ...base,
+    ...override,
+    excludedCommands: mergeUnique(base?.excludedCommands, override?.excludedCommands),
+    ...(filesystem ? { filesystem } : {}),
+    ...(network ? { network } : {}),
+  }
+}
+
+function mergeSandboxFilesystem(
+  base: NonNullable<DockSettings['sandbox']>['filesystem'],
+  override: NonNullable<DockSettings['sandbox']>['filesystem'],
+): NonNullable<DockSettings['sandbox']>['filesystem'] {
+  if (!base && !override) return undefined
+  return {
+    ...base,
+    ...override,
+    allowRead: mergeUnique(base?.allowRead, override?.allowRead),
+    allowWrite: mergeUnique(base?.allowWrite, override?.allowWrite),
+    denyRead: mergeUnique(base?.denyRead, override?.denyRead),
+    denyWrite: mergeUnique(base?.denyWrite, override?.denyWrite),
+  }
+}
+
+function mergeSandboxNetwork(
+  base: NonNullable<DockSettings['sandbox']>['network'],
+  override: NonNullable<DockSettings['sandbox']>['network'],
+): NonNullable<DockSettings['sandbox']>['network'] {
+  if (!base && !override) return undefined
+  return {
+    ...base,
+    ...override,
+    allowedDomains: mergeUnique(base?.allowedDomains, override?.allowedDomains),
+    allowUnixSockets: mergeUnique(base?.allowUnixSockets, override?.allowUnixSockets),
+    deniedDomains: mergeUnique(base?.deniedDomains, override?.deniedDomains),
+  }
+}
+
+function mergeUnique(
+  base: readonly string[] | undefined,
+  override: readonly string[] | undefined,
+): string[] | undefined {
+  if (!base && !override) return undefined
+  return [...new Set([...(base ?? []), ...(override ?? [])])]
 }
 
 function mergePermissions(

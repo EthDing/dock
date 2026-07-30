@@ -8,6 +8,8 @@ import {
 } from './evaluate-permission.js'
 
 export function createCanUseTool(options: {
+  autoAllowBashIfSandboxed?: () => boolean
+  isBashSandboxed?: (tool: AgentTool, input: JsonObject) => boolean
   mode: PermissionMode | (() => PermissionMode)
   requestApproval: (
     tool: AgentTool,
@@ -30,6 +32,19 @@ export function createCanUseTool(options: {
       rules: options.rules,
       subject,
     })
+
+    const autoAllowSandboxedBash =
+      tool.name === 'Bash' &&
+      options.autoAllowBashIfSandboxed?.() === true &&
+      options.isBashSandboxed?.(tool, input) === true
+
+    if (
+      autoAllowSandboxedBash &&
+      decision.behavior !== 'deny' &&
+      !subject.requiresBypassConfirmation
+    ) {
+      return { behavior: 'allow' }
+    }
 
     if (decision.behavior === 'allow') return { behavior: 'allow' }
     if (decision.behavior === 'deny') {

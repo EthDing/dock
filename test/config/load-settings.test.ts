@@ -22,6 +22,12 @@ describe('loadSettings', () => {
         model: 'user-model',
         permissions: { allow: ['Read'], deny: ['Read(.env)'] },
         providers: { primary: { protocol: 'anthropic-messages' } },
+        sandbox: {
+          autoAllowBashIfSandboxed: false,
+          enabled: true,
+          filesystem: { denyRead: ['~/.ssh'] },
+          network: { allowedDomains: ['github.com'] },
+        },
       }),
     )
     await writeFile(
@@ -29,11 +35,22 @@ describe('loadSettings', () => {
       JSON.stringify({
         permissions: { allow: ['Bash(pnpm test)'] },
         providers: { primary: { baseUrl: 'https://gateway.example' } },
+        sandbox: {
+          filesystem: { allowWrite: ['/tmp/build'] },
+          network: { allowedDomains: ['registry.npmjs.org'] },
+        },
       }),
     )
     await writeFile(
       join(projectDir, '.dock', 'settings.local.json'),
-      JSON.stringify({ model: 'local-model', permissions: { ask: ['Edit'] } }),
+      JSON.stringify({
+        model: 'local-model',
+        permissions: { ask: ['Edit'] },
+        sandbox: {
+          autoAllowBashIfSandboxed: true,
+          network: { deniedDomains: ['blocked.example'] },
+        },
+      }),
     )
 
     const loaded = await loadSettings({ cwd, homeDir })
@@ -50,6 +67,18 @@ describe('loadSettings', () => {
         primary: {
           baseUrl: 'https://gateway.example',
           protocol: 'anthropic-messages',
+        },
+      },
+      sandbox: {
+        autoAllowBashIfSandboxed: true,
+        enabled: true,
+        filesystem: {
+          allowWrite: ['/tmp/build'],
+          denyRead: ['~/.ssh'],
+        },
+        network: {
+          allowedDomains: ['github.com', 'registry.npmjs.org'],
+          deniedDomains: ['blocked.example'],
         },
       },
     })

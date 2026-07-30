@@ -2,6 +2,11 @@ import { Editor, Key, Markdown, SelectList, Spacer, Text, matchesKey, type TUI }
 import type { AgentEvent } from '../agent/run-agent-loop.js'
 import type { PermissionBroker, PermissionRequest } from '../permissions/permission-broker.js'
 import type { PermissionMode } from '../permissions/evaluate-permission.js'
+import type {
+  SandboxNetworkPermissionBroker,
+  SandboxNetworkRequest,
+  SandboxNetworkResponse,
+} from '../sandbox/network-permission-broker.js'
 import type { TranscriptMessage } from '../messages/create-message.js'
 import type { ToolUseBlock } from '../model/types.js'
 import { editorTheme, markdownTheme, selectListTheme } from './themes.js'
@@ -50,7 +55,9 @@ export class DockTuiApp {
   constructor(options: {
     controller: DockUiController
     permissionBroker?: PermissionBroker
+    sandboxNetworkPermissionBroker?: SandboxNetworkPermissionBroker
     sessionCommands?: DockSessionCommands
+    startupNotices?: readonly string[]
     tui: TUI
   }) {
     this.#controller = options.controller
@@ -70,6 +77,9 @@ export class DockTuiApp {
 
     this.#tui.addChild(new Text('Dock', 1, 0))
     this.#tui.addChild(new Spacer(1))
+    for (const notice of options.startupNotices ?? []) {
+      this.#tui.addChild(new Text(`Warning: ${notice}`, 1, 0))
+    }
     this.#tui.addChild(this.#status)
     this.#tui.addChild(this.#editor)
     this.#tui.setFocus(this.#editor)
@@ -104,6 +114,9 @@ export class DockTuiApp {
       return undefined
     })
     options.permissionBroker?.setHandler((request) => this.#requestPermission(request))
+    options.sandboxNetworkPermissionBroker?.setHandler((request) =>
+      this.#requestSandboxNetwork(request),
+    )
   }
 
   start(): void {
@@ -305,6 +318,24 @@ export class DockTuiApp {
       request.signal.addEventListener('abort', onAbort, { once: true })
       if (request.signal.aborted) finish(false)
     })
+  }
+
+  async #requestSandboxNetwork(request: SandboxNetworkRequest): Promise<SandboxNetworkResponse> {
+    this.#status.setText(`Network permission required · ${request.host}`)
+    this.#tui.requestRender()
+    const selected = await this.#select([
+      { description: 'Allow this connection', label: 'Yes', value: 'yes' },
+      {
+        description: `Add ${request.host} to local settings`,
+        label: "Yes, and don't ask again",
+        value: 'persist',
+      },
+      { description: 'Block this connection', label: 'No', value: 'no' },
+    ])
+    this.#status.setText(
+      `${this.#controller.permissionMode ?? 'default'} · ${this.#busy ? 'working' : 'ready'}`,
+    )
+    return { allow: selected === 'yes' || selected === 'persist', persist: selected === 'persist' }
   }
 
   #showError(error: unknown): void {

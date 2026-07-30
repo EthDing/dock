@@ -15,7 +15,7 @@ export type AgentTool = {
   isConcurrencySafe: (input: JsonObject) => boolean
   execute: (
     input: JsonObject,
-    options: { parentMessageUuid: UUID; signal: AbortSignal },
+    options: { parentMessageUuid: UUID; signal: AbortSignal; toolUseId: string },
   ) => Promise<AgentToolResult>
 }
 

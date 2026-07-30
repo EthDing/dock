@@ -35,6 +35,7 @@ async function setup() {
 const executionOptions = {
   parentMessageUuid: ASSISTANT_UUID,
   signal: new AbortController().signal,
+  toolUseId: 'tool-1',
 }
 
 describe('file tools', () => {

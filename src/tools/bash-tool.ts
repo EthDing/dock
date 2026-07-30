@@ -10,23 +10,49 @@ const MAX_OUTPUT_CHARS = 30_000
 
 const inputSchema = z.strictObject({
   command: z.string().min(1),
+  dangerouslyDisableSandbox: z.boolean().optional(),
   description: z.string().optional(),
   timeout: z.number().int().positive().max(MAX_TIMEOUT_MS).optional(),
 })
 
-export function createBashTool(options: { cwd: string; homeDir?: string }): AgentTool {
+export type BashSandboxRuntime = {
+  annotateFailure: (command: string, output: string) => string
+  cleanupAfterCommand: () => void
+  shouldUseSandbox: (input: { command: string; dangerouslyDisableSandbox?: boolean }) => boolean
+  wrapCommand: (command: string, signal: AbortSignal, commandId: string) => Promise<string>
+}
+
+export function createBashTool(options: {
+  cwd: string
+  homeDir?: string
+  sandbox?: BashSandboxRuntime
+}): AgentTool {
   const cwd = resolve(options.cwd)
   return {
     description: 'Executes a shell command in the project environment.',
-    async execute(input, { signal }) {
+    async execute(input, { signal, toolUseId }) {
       const parsed = inputSchema.parse(input)
-      const result = await runBash(
-        parsed.command,
-        cwd,
-        parsed.timeout ?? DEFAULT_TIMEOUT_MS,
-        signal,
-      )
-      const output = truncateEnd(result.output.trimEnd())
+      const sandboxed =
+        options.sandbox?.shouldUseSandbox({
+          command: parsed.command,
+          ...(parsed.dangerouslyDisableSandbox === undefined
+            ? {}
+            : { dangerouslyDisableSandbox: parsed.dangerouslyDisableSandbox }),
+        }) ?? false
+      const command = sandboxed
+        ? await options.sandbox!.wrapCommand(parsed.command, signal, toolUseId)
+        : parsed.command
+      let result: Awaited<ReturnType<typeof runBash>>
+      try {
+        result = await runBash(command, cwd, parsed.timeout ?? DEFAULT_TIMEOUT_MS, signal)
+      } finally {
+        if (sandboxed) options.sandbox?.cleanupAfterCommand()
+      }
+      const rawOutput =
+        result.code === 0
+          ? result.output
+          : (options.sandbox?.annotateFailure(parsed.command, result.output) ?? result.output)
+      const output = truncateEnd(rawOutput.trimEnd())
       const suffix = result.code === 0 ? '' : `${output ? '\n' : ''}Exit code ${result.code ?? 1}`
       return {
         content: `${output}${suffix}`,
@@ -37,6 +63,7 @@ export function createBashTool(options: { cwd: string; homeDir?: string }): Agen
       additionalProperties: false,
       properties: {
         command: { type: 'string' },
+        dangerouslyDisableSandbox: { type: 'boolean' },
         description: { type: 'string' },
         timeout: { maximum: MAX_TIMEOUT_MS, minimum: 1, type: 'integer' },
       },

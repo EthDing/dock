@@ -370,7 +370,11 @@ async function executeToolUse(
       }
     }
     try {
-      result = await tool.execute(toolUse.input, { parentMessageUuid, signal })
+      result = await tool.execute(toolUse.input, {
+        parentMessageUuid,
+        signal,
+        toolUseId: toolUse.id,
+      })
     } catch (error) {
       result = {
         content: error instanceof Error ? error.message : String(error),

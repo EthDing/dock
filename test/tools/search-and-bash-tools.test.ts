@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createBashTool } from '../../src/tools/bash-tool.js'
 import { createGlobTool, createGrepTool } from '../../src/tools/search-tools.js'
 import { asMessageUuid } from '../../src/sessions/ids.js'
@@ -9,6 +9,7 @@ import { asMessageUuid } from '../../src/sessions/ids.js'
 const executionOptions = {
   parentMessageUuid: asMessageUuid('a0000000-0000-4000-8000-000000000001'),
   signal: new AbortController().signal,
+  toolUseId: 'tool-1',
 }
 
 describe('search tools', () => {
@@ -46,5 +47,26 @@ describe('Bash tool', () => {
     expect(failure).toMatchObject({ isError: true })
     expect(failure.content).toContain('failure')
     expect(failure.content).toContain('Exit code 7')
+  })
+
+  it('executes the sandbox-wrapped command and cleans up afterward', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dock-bash-tool-'))
+    const sandbox = {
+      annotateFailure: (_command: string, output: string) => output,
+      cleanupAfterCommand: vi.fn(),
+      shouldUseSandbox: vi.fn(() => true),
+      wrapCommand: vi.fn(async () => 'printf sandboxed'),
+    }
+    const bash = createBashTool({ cwd, sandbox })
+
+    const result = await bash.execute({ command: 'printf original' }, executionOptions)
+
+    expect(result.content).toBe('sandboxed')
+    expect(sandbox.wrapCommand).toHaveBeenCalledWith(
+      'printf original',
+      executionOptions.signal,
+      executionOptions.toolUseId,
+    )
+    expect(sandbox.cleanupAfterCommand).toHaveBeenCalledOnce()
   })
 })

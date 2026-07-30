@@ -3,15 +3,19 @@ import { createCanUseTool } from '../../src/permissions/can-use-tool.js'
 import type { AgentTool } from '../../src/tools/types.js'
 import { asMessageUuid } from '../../src/sessions/ids.js'
 
-const tool = (name: string, readOnly: boolean): AgentTool => ({
+const tool = (
+  name: string,
+  readOnly: boolean,
+  options: { destructive?: boolean; specifier?: string } = {},
+): AgentTool => ({
   description: name,
   execute: async () => ({ content: '' }),
   getPermissionSubject: () => ({
     isInWorkingDirectory: true,
     isReadOnly: readOnly,
-    matchesSpecifier: () => false,
+    matchesSpecifier: (pattern) => pattern === options.specifier,
     name,
-    requiresBypassConfirmation: false,
+    requiresBypassConfirmation: options.destructive ?? false,
   }),
   inputSchema: { type: 'object' },
   isConcurrencySafe: () => readOnly,
@@ -46,5 +50,28 @@ describe('createCanUseTool', () => {
       behavior: 'deny',
     })
     expect(requestApproval).not.toHaveBeenCalled()
+  })
+
+  it('auto-allows actually sandboxed Bash while preserving deny and circuit breakers', async () => {
+    const requestApproval = vi.fn(async () => true)
+    const canUseTool = createCanUseTool({
+      autoAllowBashIfSandboxed: () => true,
+      isBashSandboxed: () => true,
+      mode: 'default',
+      requestApproval,
+      rules: { ask: ['Bash(*)'], deny: ['Bash(blocked)'] },
+    })
+
+    await expect(
+      canUseTool(tool('Bash', false, { specifier: 'safe' }), { command: 'safe' }, context),
+    ).resolves.toEqual({ behavior: 'allow' })
+    await expect(
+      canUseTool(tool('Bash', false, { specifier: 'blocked' }), { command: 'blocked' }, context),
+    ).resolves.toMatchObject({ behavior: 'deny' })
+    await expect(
+      canUseTool(tool('Bash', false, { destructive: true }), { command: 'rm -rf /' }, context),
+    ).resolves.toEqual({ behavior: 'allow' })
+
+    expect(requestApproval).toHaveBeenCalledTimes(1)
   })
 })

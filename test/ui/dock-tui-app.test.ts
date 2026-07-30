@@ -5,6 +5,7 @@ import {
   type DockSessionCommands,
   type DockUiController,
 } from '../../src/ui/dock-tui-app.js'
+import { SandboxNetworkPermissionBroker } from '../../src/sandbox/network-permission-broker.js'
 
 class MemoryTerminal implements Terminal {
   columns = 80
@@ -184,6 +185,30 @@ describe('DockTuiApp', () => {
     await turn
 
     expect(aborted).toBe(true)
+    await app.stop()
+  })
+
+  it('renders sandbox network approval requests', async () => {
+    const controller: DockUiController = {
+      abort: () => {},
+      close: async () => {},
+      async *submit() {},
+    }
+    const broker = new SandboxNetworkPermissionBroker()
+    const terminal = new MemoryTerminal()
+    const tui = new TuiMainScreen(terminal)
+    const app = new DockTuiApp({
+      controller,
+      sandboxNetworkPermissionBroker: broker,
+      tui,
+    })
+    app.start()
+
+    const response = broker.request({ host: 'example.com', port: 443 })
+    await Promise.resolve()
+    terminal.send('\r')
+
+    await expect(response).resolves.toEqual({ allow: true, persist: false })
     await app.stop()
   })
 })

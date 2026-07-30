@@ -7,6 +7,7 @@
     "dock": "dist/cli.js"
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.74",
     "@anthropic-ai/sdk": "0.121.0",
     "@dock/tui": "workspace:*",
     "fast-glob": "3.3.3",
