@@ -28,6 +28,10 @@ environment variable. If no credential is already available, Dock asks for the k
 input and stores it in `~/.dock/.credentials.json` with file mode `0600`. Later launches need only
 the `dock` command. A configured environment variable overrides the stored credential.
 
+The first launch in a project also asks whether you trust that workspace before Dock reads project
+settings or AGENTS instructions. Trust is stored per project in
+`~/.dock/trusted-workspaces.json`; trusting a project covers its descendants.
+
 ## Manual configuration
 
 To configure Dock without the first-run flow, create `~/.dock/settings.json`:
@@ -68,3 +72,18 @@ Startup session flags include `--continue`, `--resume <id|name>`, `--fork-sessio
 - `/model <provider:model-id>` switches adapters, while `/permissions` changes the active mode.
 - `/context`, `/compact [instructions]`, and `/rewind` manage the active context and checkpoints.
 - `/exit` closes the session cleanly.
+
+## Bash sandbox
+
+On Linux or WSL2, install the Sandbox Runtime system dependencies once:
+
+```bash
+sudo apt-get install bubblewrap socat ripgrep
+```
+
+Run `/sandbox` inside Dock and choose auto-allow, regular permissions, or disabled. The default is
+disabled. Auto-allow matches Claude Code behavior: Bash calls that actually enter the OS sandbox
+skip ordinary approval prompts, while explicit deny rules and critical deletion checks still apply.
+The current workspace is writable, Dock credentials are unreadable, and network access is routed
+through a domain approval prompt. Persistent domain approvals are stored in
+`.dock/settings.local.json`.

@@ -1,12 +1,17 @@
 import { Editor, Key, Markdown, SelectList, Spacer, Text, matchesKey, type TUI } from '@dock/tui'
 import type { AgentEvent } from '../agent/run-agent-loop.js'
-import type { PermissionBroker, PermissionRequest } from '../permissions/permission-broker.js'
+import type {
+  PermissionApproval,
+  PermissionBroker,
+  PermissionRequest,
+} from '../permissions/permission-broker.js'
 import type { PermissionMode } from '../permissions/evaluate-permission.js'
 import type {
   SandboxNetworkPermissionBroker,
   SandboxNetworkRequest,
   SandboxNetworkResponse,
 } from '../sandbox/network-permission-broker.js'
+import type { DockSandboxMode } from '../sandbox/dock-sandbox.js'
 import type { TranscriptMessage } from '../messages/create-message.js'
 import type { ToolUseBlock } from '../model/types.js'
 import { editorTheme, markdownTheme, selectListTheme } from './themes.js'
@@ -39,12 +44,18 @@ export type DockSessionCommands = {
   setModel: (reference: string) => Promise<void>
 }
 
+export type DockSandboxCommands = {
+  getMode: () => DockSandboxMode
+  setMode: (mode: DockSandboxMode) => Promise<void>
+}
+
 export class DockTuiApp {
   readonly #controller: DockUiController
   readonly #editor: Editor
   readonly #status: Text
   readonly #tui: TUI
   readonly #sessionCommands: DockSessionCommands | undefined
+  readonly #sandboxCommands: DockSandboxCommands | undefined
   readonly #permissionCycle: PermissionMode[]
   readonly #queue: string[] = []
   readonly #stopped: Promise<void>
@@ -56,6 +67,7 @@ export class DockTuiApp {
     controller: DockUiController
     permissionBroker?: PermissionBroker
     sandboxNetworkPermissionBroker?: SandboxNetworkPermissionBroker
+    sandboxCommands?: DockSandboxCommands
     sessionCommands?: DockSessionCommands
     startupNotices?: readonly string[]
     tui: TUI
@@ -63,6 +75,7 @@ export class DockTuiApp {
     this.#controller = options.controller
     this.#tui = options.tui
     this.#sessionCommands = options.sessionCommands
+    this.#sandboxCommands = options.sandboxCommands
     let resolveStopped!: () => void
     this.#stopped = new Promise((resolve) => {
       resolveStopped = resolve
@@ -179,6 +192,10 @@ export class DockTuiApp {
       await this.#selectPermissionMode()
       return
     }
+    if (trimmed === '/sandbox') {
+      await this.#selectSandboxMode()
+      return
+    }
     if (trimmed === '/rewind') {
       await this.#selectRewindPoint()
       return
@@ -289,34 +306,59 @@ export class DockTuiApp {
     this.#tui.requestRender(true)
   }
 
-  async #requestPermission(request: PermissionRequest): Promise<boolean> {
+  async #requestPermission(request: PermissionRequest): Promise<PermissionApproval> {
     this.#status.setText(`Permission required · ${request.tool.name}`)
     this.#tui.requestRender()
-    return new Promise<boolean>((resolve) => {
+    return new Promise<PermissionApproval>((resolve) => {
       const list = new SelectList(
         [
-          { description: 'Run this tool call', label: 'Yes', value: 'yes' },
+          { description: 'Run only this tool call', label: 'Yes', value: 'once' },
+          {
+            description: 'Allow the same call until this session controller ends',
+            label: 'Yes, for this session',
+            value: 'session',
+          },
+          ...(request.tool.getPermissionRule?.(request.input)
+            ? [
+                {
+                  description: 'Add an exact allow rule to project-local settings',
+                  label: "Yes, and don't ask again",
+                  value: 'always',
+                },
+              ]
+            : []),
           { description: 'Return a denial to the model', label: 'No', value: 'no' },
         ],
-        2,
+        request.tool.getPermissionRule?.(request.input) ? 4 : 3,
         selectListTheme,
       )
       const overlay = this.#tui.showOverlay(list, { anchor: 'bottom-center', width: '70%' })
       let settled = false
-      const finish = (approved: boolean) => {
+      const finish = (approval: PermissionApproval) => {
         if (settled) return
         settled = true
         request.signal.removeEventListener('abort', onAbort)
         overlay.hide()
         this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · working`)
         this.#tui.requestRender(true)
-        resolve(approved)
+        resolve(approval)
       }
-      const onAbort = () => finish(false)
-      list.onSelect = (item) => finish(item.value === 'yes')
-      list.onCancel = () => finish(false)
+      const onAbort = () => finish({ behavior: 'deny' })
+      list.onSelect = (item) => {
+        const rule = request.tool.getPermissionRule?.(request.input)
+        finish(
+          item.value === 'once'
+            ? { behavior: 'allow_once' }
+            : item.value === 'session'
+              ? { behavior: 'allow_session' }
+              : item.value === 'always' && rule
+                ? { behavior: 'allow_always', rule }
+                : { behavior: 'deny' },
+        )
+      }
+      list.onCancel = () => finish({ behavior: 'deny' })
       request.signal.addEventListener('abort', onAbort, { once: true })
-      if (request.signal.aborted) finish(false)
+      if (request.signal.aborted) finish({ behavior: 'deny' })
     })
   }
 
@@ -356,6 +398,31 @@ export class DockTuiApp {
     if (!selected) return
     this.#controller.setPermissionMode(selected as PermissionMode)
     this.#setReadyStatus()
+  }
+
+  async #selectSandboxMode(): Promise<void> {
+    if (!this.#sandboxCommands) return
+    const selected = await this.#select([
+      {
+        description: 'Sandboxed Bash runs without ordinary approval prompts',
+        label: 'Enabled · auto-allow',
+        value: 'auto-allow',
+      },
+      {
+        description: 'Sandboxed Bash still uses the regular permission flow',
+        label: 'Enabled · permissions',
+        value: 'regular-permissions',
+      },
+      {
+        description: 'Run Bash without OS sandbox isolation',
+        label: 'Disabled',
+        value: 'off',
+      },
+    ])
+    if (!selected) return
+    await this.#sandboxCommands.setMode(selected as DockSandboxMode)
+    this.#insertTranscript(new Text(`Sandbox mode: ${this.#sandboxCommands.getMode()}`, 1, 0))
+    this.#tui.requestRender()
   }
 
   #cyclePermissionMode(): void {

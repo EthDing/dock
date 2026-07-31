@@ -122,4 +122,25 @@ describe('DockSandbox', () => {
       sandbox.shouldUseSandbox({ command: 'pnpm test', dangerouslyDisableSandbox: true }),
     ).toBe(false)
   })
+
+  it('can enable regular or auto-allow mode and disable again', async () => {
+    const manager = createManager()
+    const sandbox = new DockSandbox({
+      config: createSandboxRuntimeConfig({ cwd: '/work', homeDir: '/home/user', settings: {} }),
+      manager,
+      settings: {},
+    })
+    await sandbox.initialize(async () => false)
+
+    await sandbox.setMode('regular-permissions')
+    expect(sandbox.isEnabled).toBe(true)
+    expect(sandbox.autoAllowBashIfSandboxed).toBe(false)
+
+    await sandbox.setMode('auto-allow')
+    expect(sandbox.autoAllowBashIfSandboxed).toBe(true)
+
+    await sandbox.setMode('off')
+    expect(sandbox.isEnabled).toBe(false)
+    expect(manager.reset).toHaveBeenCalledOnce()
+  })
 })

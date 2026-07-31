@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Terminal } from '@dock/tui'
@@ -31,7 +31,13 @@ describe('startDock', () => {
     const root = await mkdtemp(join(tmpdir(), 'dock-start-'))
 
     await expect(
-      startDock({ args: [], cwd: root, environment: {}, homeDir: join(root, 'home') }),
+      startDock({
+        args: [],
+        cwd: root,
+        environment: {},
+        homeDir: join(root, 'home'),
+        workspaceTrustPrompter: async () => true,
+      }),
     ).rejects.toThrow('No model configured')
   })
 
@@ -51,6 +57,7 @@ describe('startDock', () => {
       homeDir,
       onboardingPrompter,
       terminal: new ExitTerminal(),
+      workspaceTrustPrompter: async () => true,
     })
 
     await expect(readFile(join(homeDir, '.dock', 'settings.json'), 'utf8')).resolves.toContain(
@@ -73,6 +80,7 @@ describe('startDock', () => {
           input: async () => inputs.shift() ?? '',
           select: async () => 'anthropic-messages',
         },
+        workspaceTrustPrompter: async () => true,
       }),
     ).rejects.toThrow('Configuration saved. Run dock in an interactive terminal')
     await expect(readFile(join(homeDir, '.dock', 'settings.json'), 'utf8')).resolves.toContain(
@@ -96,6 +104,7 @@ describe('startDock', () => {
         select: async () => 'anthropic-messages',
       },
       terminal: new ExitTerminal(),
+      workspaceTrustPrompter: async () => true,
     })
 
     await expect(readFile(join(homeDir, '.dock', '.credentials.json'), 'utf8')).resolves.toContain(
@@ -108,7 +117,26 @@ describe('startDock', () => {
         environment: {},
         homeDir,
         terminal: new ExitTerminal(),
+        workspaceTrustPrompter: async () => true,
       }),
     ).resolves.toBeUndefined()
+  })
+
+  it('checks workspace trust before parsing project settings', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dock-start-'))
+    const homeDir = join(root, 'home')
+    await mkdir(join(root, '.git'))
+    await mkdir(join(root, '.dock'))
+    await writeFile(join(root, '.dock', 'settings.json'), '{ invalid project json')
+
+    await expect(
+      startDock({
+        args: [],
+        cwd: root,
+        environment: {},
+        homeDir,
+        workspaceTrustPrompter: async () => false,
+      }),
+    ).rejects.toThrow('Workspace trust declined')
   })
 })

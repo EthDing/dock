@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createCanUseTool } from '../../src/permissions/can-use-tool.js'
+import { SessionPermissionState } from '../../src/permissions/session-permission-state.js'
 import type { AgentTool } from '../../src/tools/types.js'
 import { asMessageUuid } from '../../src/sessions/ids.js'
 
@@ -30,7 +31,7 @@ const context = {
 
 describe('createCanUseTool', () => {
   it('asks only when the policy returns ask', async () => {
-    const requestApproval = vi.fn(async () => true)
+    const requestApproval = vi.fn(async () => ({ behavior: 'allow_once' as const }))
     const canUseTool = createCanUseTool({ mode: 'default', requestApproval, rules: {} })
 
     await expect(canUseTool(tool('Read', true), {}, context)).resolves.toEqual({
@@ -43,7 +44,7 @@ describe('createCanUseTool', () => {
   })
 
   it('denies plan-mode writes without prompting', async () => {
-    const requestApproval = vi.fn(async () => true)
+    const requestApproval = vi.fn(async () => ({ behavior: 'allow_once' as const }))
     const canUseTool = createCanUseTool({ mode: 'plan', requestApproval, rules: {} })
 
     await expect(canUseTool(tool('Write', false), {}, context)).resolves.toMatchObject({
@@ -53,7 +54,7 @@ describe('createCanUseTool', () => {
   })
 
   it('auto-allows actually sandboxed Bash while preserving deny and circuit breakers', async () => {
-    const requestApproval = vi.fn(async () => true)
+    const requestApproval = vi.fn(async () => ({ behavior: 'allow_once' as const }))
     const canUseTool = createCanUseTool({
       autoAllowBashIfSandboxed: () => true,
       isBashSandboxed: () => true,
@@ -73,5 +74,62 @@ describe('createCanUseTool', () => {
     ).resolves.toEqual({ behavior: 'allow' })
 
     expect(requestApproval).toHaveBeenCalledTimes(1)
+  })
+
+  it('reuses an exact session approval without overriding explicit deny', async () => {
+    const requestApproval = vi.fn(async () => ({ behavior: 'allow_session' as const }))
+    const sessionPermissions = new SessionPermissionState()
+    const canUseTool = createCanUseTool({
+      mode: 'default',
+      requestApproval,
+      rules: { deny: ['Edit(blocked)'] },
+      sessionPermissions,
+    })
+    const edit = tool('Edit', false, { specifier: 'allowed' })
+
+    await expect(canUseTool(edit, { file_path: '/work/a' }, context)).resolves.toEqual({
+      behavior: 'allow',
+    })
+    await expect(canUseTool(edit, { file_path: '/work/a' }, context)).resolves.toEqual({
+      behavior: 'allow',
+    })
+    await expect(canUseTool(edit, { file_path: '/work/b' }, context)).resolves.toEqual({
+      behavior: 'allow',
+    })
+    expect(requestApproval).toHaveBeenCalledTimes(2)
+
+    const denied = createCanUseTool({
+      mode: 'default',
+      requestApproval,
+      rules: { deny: ['Edit(allowed)'] },
+      sessionPermissions,
+    })
+    await expect(denied(edit, { file_path: '/work/a' }, context)).resolves.toMatchObject({
+      behavior: 'deny',
+    })
+  })
+
+  it('persists an always-allow response and caches it for the active session', async () => {
+    const persistApproval = vi.fn(async () => {})
+    const requestApproval = vi.fn(async () => ({
+      behavior: 'allow_always' as const,
+      rule: 'Bash(pnpm test)',
+    }))
+    const sessionPermissions = new SessionPermissionState()
+    const canUseTool = createCanUseTool({
+      mode: 'default',
+      persistApproval,
+      requestApproval,
+      rules: {},
+      sessionPermissions,
+    })
+    const bash = tool('Bash', false)
+
+    await canUseTool(bash, { command: 'pnpm test' }, context)
+    await canUseTool(bash, { command: 'pnpm test' }, context)
+
+    expect(persistApproval).toHaveBeenCalledOnce()
+    expect(persistApproval).toHaveBeenCalledWith('Bash(pnpm test)')
+    expect(requestApproval).toHaveBeenCalledOnce()
   })
 })

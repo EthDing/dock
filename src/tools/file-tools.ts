@@ -33,7 +33,7 @@ const editInputSchema = z.strictObject({
 
 export function createReadTool(dependencies: FileToolDependencies): AgentTool {
   return {
-    description: 'Reads a text file from the local filesystem.',
+    description: 'Reads a text file from the local filesystem. file_path must be an absolute path.',
     async execute(input, { signal }) {
       throwIfAborted(signal)
       const parsed = readInputSchema.parse(input)
@@ -63,7 +63,7 @@ export function createReadTool(dependencies: FileToolDependencies): AgentTool {
     inputSchema: {
       additionalProperties: false,
       properties: {
-        file_path: { type: 'string' },
+        file_path: { description: 'Absolute path to the file to read.', type: 'string' },
         limit: { minimum: 1, type: 'integer' },
         offset: { minimum: 1, type: 'integer' },
       },
@@ -80,6 +80,7 @@ export function createReadTool(dependencies: FileToolDependencies): AgentTool {
       name: 'Read',
       requiresBypassConfirmation: false,
     }),
+    getPermissionRule: (input) => filePermissionRule('Read', input.file_path),
     isConcurrencySafe: () => true,
     name: 'Read',
   }
@@ -87,7 +88,7 @@ export function createReadTool(dependencies: FileToolDependencies): AgentTool {
 
 export function createWriteTool(dependencies: FileToolDependencies): AgentTool {
   return {
-    description: 'Writes a file to the local filesystem.',
+    description: 'Writes a file to the local filesystem. file_path must be an absolute path.',
     async execute(input, { parentMessageUuid, signal }) {
       throwIfAborted(signal)
       const parsed = writeInputSchema.parse(input)
@@ -106,7 +107,10 @@ export function createWriteTool(dependencies: FileToolDependencies): AgentTool {
     },
     inputSchema: {
       additionalProperties: false,
-      properties: { content: { type: 'string' }, file_path: { type: 'string' } },
+      properties: {
+        content: { type: 'string' },
+        file_path: { description: 'Absolute path to the file to write.', type: 'string' },
+      },
       required: ['file_path', 'content'],
       type: 'object',
     },
@@ -120,6 +124,7 @@ export function createWriteTool(dependencies: FileToolDependencies): AgentTool {
       name: 'Write',
       requiresBypassConfirmation: false,
     }),
+    getPermissionRule: (input) => filePermissionRule('Write', input.file_path),
     isConcurrencySafe: () => false,
     name: 'Write',
   }
@@ -127,7 +132,8 @@ export function createWriteTool(dependencies: FileToolDependencies): AgentTool {
 
 export function createEditTool(dependencies: FileToolDependencies): AgentTool {
   return {
-    description: 'Performs an exact string replacement in a file.',
+    description:
+      'Performs an exact string replacement in a file. file_path must be an absolute path.',
     async execute(input, { parentMessageUuid, signal }) {
       throwIfAborted(signal)
       const parsed = editInputSchema.parse(input)
@@ -168,7 +174,7 @@ export function createEditTool(dependencies: FileToolDependencies): AgentTool {
     inputSchema: {
       additionalProperties: false,
       properties: {
-        file_path: { type: 'string' },
+        file_path: { description: 'Absolute path to the file to edit.', type: 'string' },
         new_string: { type: 'string' },
         old_string: { type: 'string' },
         replace_all: { default: false, type: 'boolean' },
@@ -186,6 +192,7 @@ export function createEditTool(dependencies: FileToolDependencies): AgentTool {
       name: 'Edit',
       requiresBypassConfirmation: false,
     }),
+    getPermissionRule: (input) => filePermissionRule('Edit', input.file_path),
     isConcurrencySafe: () => false,
     name: 'Edit',
   }
@@ -207,6 +214,11 @@ async function assertSafeToWriteExisting(filePath: string, state: FileReadState)
 function absolutePath(filePath: string): string {
   if (!isAbsolute(filePath)) throw new Error(`File path must be absolute: ${filePath}`)
   return resolve(filePath)
+}
+
+function filePermissionRule(toolName: string, filePath: unknown): string | undefined {
+  if (typeof filePath !== 'string' || !isAbsolute(filePath)) return undefined
+  return `${toolName}(/${resolve(filePath).replaceAll('\\', '/')})`
 }
 
 function isPathWithin(cwd: string, filePath: string): boolean {

@@ -39,6 +39,19 @@ const executionOptions = {
 }
 
 describe('file tools', () => {
+  it('publishes the absolute-path contract to the model', async () => {
+    const { edit, read, write } = await setup()
+
+    for (const tool of [read, write, edit]) {
+      expect(tool.description).toContain('absolute path')
+      expect(tool.inputSchema).toMatchObject({
+        properties: {
+          file_path: { description: expect.stringMatching(/absolute path/i) },
+        },
+      })
+    }
+  })
+
   it('requires a full Read before editing an existing file', async () => {
     const { cwd, edit } = await setup()
     const filePath = join(cwd, 'file.txt')

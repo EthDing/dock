@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { addLocalPermissionRule } from '../../src/config/write-settings.js'
+import { addLocalPermissionRule, updateLocalSandboxMode } from '../../src/config/write-settings.js'
 
 describe('addLocalPermissionRule', () => {
   it('preserves local settings and adds a rule only once', async () => {
@@ -23,6 +23,33 @@ describe('addLocalPermissionRule', () => {
     expect(value).toEqual({
       model: 'deepseek:model',
       permissions: { allow: ['WebFetch(domain:x)'], deny: ['Read(.env)'] },
+    })
+  })
+
+  it('updates sandbox mode without replacing sandbox policy', async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), 'dock-write-settings-'))
+    const directory = join(projectRoot, '.dock')
+    await mkdir(directory)
+    await writeFile(
+      join(directory, 'settings.local.json'),
+      JSON.stringify({ sandbox: { network: { allowedDomains: ['github.com'] } } }),
+    )
+
+    await updateLocalSandboxMode({
+      autoAllowBashIfSandboxed: true,
+      enabled: true,
+      projectRoot,
+    })
+
+    const value = JSON.parse(
+      await readFile(join(directory, 'settings.local.json'), 'utf8'),
+    ) as Record<string, unknown>
+    expect(value).toEqual({
+      sandbox: {
+        autoAllowBashIfSandboxed: true,
+        enabled: true,
+        network: { allowedDomains: ['github.com'] },
+      },
     })
   })
 })

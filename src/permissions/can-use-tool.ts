@@ -6,6 +6,8 @@ import {
   type PermissionMode,
   type PermissionRules,
 } from './evaluate-permission.js'
+import type { PermissionApproval } from './permission-broker.js'
+import type { SessionPermissionState } from './session-permission-state.js'
 
 export function createCanUseTool(options: {
   autoAllowBashIfSandboxed?: () => boolean
@@ -16,8 +18,10 @@ export function createCanUseTool(options: {
     input: JsonObject,
     decision: PermissionDecision,
     signal: AbortSignal,
-  ) => Promise<boolean>
+  ) => Promise<PermissionApproval>
   rules: PermissionRules
+  persistApproval?: (rule: string) => Promise<void>
+  sessionPermissions?: SessionPermissionState
 }): CanUseTool {
   return async (tool, input, execution) => {
     const subject = tool.getPermissionSubject?.(input) ?? {
@@ -33,20 +37,6 @@ export function createCanUseTool(options: {
       subject,
     })
 
-    const autoAllowSandboxedBash =
-      tool.name === 'Bash' &&
-      options.autoAllowBashIfSandboxed?.() === true &&
-      options.isBashSandboxed?.(tool, input) === true
-
-    if (
-      autoAllowSandboxedBash &&
-      decision.behavior !== 'deny' &&
-      !subject.requiresBypassConfirmation
-    ) {
-      return { behavior: 'allow' }
-    }
-
-    if (decision.behavior === 'allow') return { behavior: 'allow' }
     if (decision.behavior === 'deny') {
       return {
         behavior: 'deny',
@@ -54,8 +44,30 @@ export function createCanUseTool(options: {
       }
     }
 
-    return (await options.requestApproval(tool, input, decision, execution.signal))
-      ? { behavior: 'allow' }
-      : { behavior: 'deny', message: `User denied ${tool.name}` }
+    if (options.sessionPermissions?.isAllowed(tool, input)) {
+      return { behavior: 'allow' }
+    }
+
+    const autoAllowSandboxedBash =
+      tool.name === 'Bash' &&
+      options.autoAllowBashIfSandboxed?.() === true &&
+      options.isBashSandboxed?.(tool, input) === true
+
+    if (autoAllowSandboxedBash && !subject.requiresBypassConfirmation) {
+      return { behavior: 'allow' }
+    }
+
+    if (decision.behavior === 'allow') return { behavior: 'allow' }
+
+    const approval = await options.requestApproval(tool, input, decision, execution.signal)
+    if (approval.behavior === 'allow_session' || approval.behavior === 'allow_always') {
+      options.sessionPermissions?.allow(tool, input)
+    }
+    if (approval.behavior === 'allow_always') {
+      await options.persistApproval?.(approval.rule)
+    }
+    return approval.behavior === 'deny'
+      ? { behavior: 'deny', message: `User denied ${tool.name}` }
+      : { behavior: 'allow' }
   }
 }

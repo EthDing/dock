@@ -6,6 +6,7 @@ import {
   type DockUiController,
 } from '../../src/ui/dock-tui-app.js'
 import { SandboxNetworkPermissionBroker } from '../../src/sandbox/network-permission-broker.js'
+import type { DockSandboxMode } from '../../src/sandbox/dock-sandbox.js'
 
 class MemoryTerminal implements Terminal {
   columns = 80
@@ -209,6 +210,36 @@ describe('DockTuiApp', () => {
     terminal.send('\r')
 
     await expect(response).resolves.toEqual({ allow: true, persist: false })
+    await app.stop()
+  })
+
+  it('changes sandbox mode through /sandbox', async () => {
+    const controller: DockUiController = {
+      abort: () => {},
+      close: async () => {},
+      async *submit() {},
+    }
+    let mode: DockSandboxMode = 'off'
+    const terminal = new MemoryTerminal()
+    const tui = new TuiMainScreen(terminal)
+    const app = new DockTuiApp({
+      controller,
+      sandboxCommands: {
+        getMode: () => mode,
+        setMode: async (nextMode) => {
+          mode = nextMode
+        },
+      },
+      tui,
+    })
+    app.start()
+
+    const submission = app.submit('/sandbox')
+    await Promise.resolve()
+    terminal.send('\r')
+    await submission
+
+    expect(mode).toBe('auto-allow')
     await app.stop()
   })
 })

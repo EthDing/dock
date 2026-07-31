@@ -14,6 +14,8 @@ export type BashSandboxInput = {
   dangerouslyDisableSandbox?: boolean
 }
 
+export type DockSandboxMode = 'off' | 'auto-allow' | 'regular-permissions'
+
 export type SandboxManagerApi = {
   annotateStderrWithSandboxFailures: (command: string, stderr: string) => string
   checkDependencies: () => { errors: string[]; warnings: string[] }
@@ -41,6 +43,7 @@ export class DockSandbox {
   #config: SandboxRuntimeConfig
   readonly #manager: SandboxManagerApi
   readonly #settings: SandboxSettings
+  #askCallback: SandboxAskCallback | undefined
   #enabled = false
   #unavailableReason: string | undefined
 
@@ -66,8 +69,15 @@ export class DockSandbox {
     return this.#enabled && (this.#settings.autoAllowBashIfSandboxed ?? true)
   }
 
+  get mode(): DockSandboxMode {
+    if (!this.#enabled) return 'off'
+    return (this.#settings.autoAllowBashIfSandboxed ?? true) ? 'auto-allow' : 'regular-permissions'
+  }
+
   async initialize(callback?: SandboxAskCallback): Promise<void> {
+    if (callback) this.#askCallback = callback
     if (!this.#settings.enabled) return
+    this.#unavailableReason = undefined
     const unavailableReason = this.#getUnavailableReason()
     if (unavailableReason) {
       this.#unavailableReason = unavailableReason
@@ -75,13 +85,27 @@ export class DockSandbox {
       return
     }
     try {
-      await this.#manager.initialize(this.#config, callback)
+      await this.#manager.initialize(this.#config, this.#askCallback)
       this.#enabled = true
       this.#unavailableReason = undefined
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
       this.#unavailableReason = `Sandbox failed to initialize: ${detail}`
       if (this.#settings.failIfUnavailable) throw new Error(this.#unavailableReason)
+    }
+  }
+
+  async setMode(mode: DockSandboxMode): Promise<void> {
+    if (mode === 'off') {
+      this.#settings.enabled = false
+      if (this.#enabled) await this.reset()
+      return
+    }
+    this.#settings.enabled = true
+    this.#settings.autoAllowBashIfSandboxed = mode === 'auto-allow'
+    if (!this.#enabled) await this.initialize()
+    if (!this.#enabled) {
+      throw new Error(this.#unavailableReason ?? 'Sandbox is unavailable')
     }
   }
 

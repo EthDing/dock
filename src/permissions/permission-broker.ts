@@ -9,10 +9,16 @@ export type PermissionRequest = {
   tool: AgentTool
 }
 
-export class PermissionBroker {
-  #handler: ((request: PermissionRequest) => Promise<boolean>) | undefined
+export type PermissionApproval =
+  | { behavior: 'allow_once' }
+  | { behavior: 'allow_session' }
+  | { behavior: 'allow_always'; rule: string }
+  | { behavior: 'deny' }
 
-  setHandler(handler: (request: PermissionRequest) => Promise<boolean>): void {
+export class PermissionBroker {
+  #handler: ((request: PermissionRequest) => Promise<PermissionApproval>) | undefined
+
+  setHandler(handler: (request: PermissionRequest) => Promise<PermissionApproval>): void {
     this.#handler = handler
   }
 
@@ -21,16 +27,16 @@ export class PermissionBroker {
     input: JsonObject,
     decision: PermissionDecision,
     signal: AbortSignal,
-  ): Promise<boolean> {
-    if (signal.aborted) return false
+  ): Promise<PermissionApproval> {
+    if (signal.aborted) return { behavior: 'deny' }
     const approval = this.#handler?.({ decision, input, signal, tool })
-    if (!approval) return false
+    if (!approval) return { behavior: 'deny' }
     let onAbort: (() => void) | undefined
     try {
       return await Promise.race([
         approval,
-        new Promise<boolean>((resolve) => {
-          onAbort = () => resolve(false)
+        new Promise<PermissionApproval>((resolve) => {
+          onAbort = () => resolve({ behavior: 'deny' })
           signal.addEventListener('abort', onAbort, { once: true })
         }),
       ])

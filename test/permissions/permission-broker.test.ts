@@ -13,7 +13,7 @@ const tool: AgentTool = {
 describe('PermissionBroker', () => {
   it('denies a pending approval when the turn is interrupted', async () => {
     const broker = new PermissionBroker()
-    broker.setHandler(() => new Promise<boolean>(() => {}))
+    broker.setHandler(() => new Promise(() => {}))
     const controller = new AbortController()
 
     const approval = broker.requestApproval(
@@ -24,6 +24,6 @@ describe('PermissionBroker', () => {
     )
     controller.abort('interrupt')
 
-    await expect(approval).resolves.toBe(false)
+    await expect(approval).resolves.toEqual({ behavior: 'deny' })
   })
 })

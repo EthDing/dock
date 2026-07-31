@@ -32,26 +32,28 @@ export function createBashTool(options: {
     description: 'Executes a shell command in the project environment.',
     async execute(input, { signal, toolUseId }) {
       const parsed = inputSchema.parse(input)
+      const sandbox = options.sandbox
       const sandboxed =
-        options.sandbox?.shouldUseSandbox({
+        sandbox?.shouldUseSandbox({
           command: parsed.command,
           ...(parsed.dangerouslyDisableSandbox === undefined
             ? {}
             : { dangerouslyDisableSandbox: parsed.dangerouslyDisableSandbox }),
         }) ?? false
-      const command = sandboxed
-        ? await options.sandbox!.wrapCommand(parsed.command, signal, toolUseId)
-        : parsed.command
+      const command =
+        sandboxed && sandbox
+          ? await sandbox.wrapCommand(parsed.command, signal, toolUseId)
+          : parsed.command
       let result: Awaited<ReturnType<typeof runBash>>
       try {
         result = await runBash(command, cwd, parsed.timeout ?? DEFAULT_TIMEOUT_MS, signal)
       } finally {
-        if (sandboxed) options.sandbox?.cleanupAfterCommand()
+        if (sandboxed && sandbox) sandbox.cleanupAfterCommand()
       }
       const rawOutput =
         result.code === 0
           ? result.output
-          : (options.sandbox?.annotateFailure(parsed.command, result.output) ?? result.output)
+          : (sandbox?.annotateFailure(parsed.command, result.output) ?? result.output)
       const output = truncateEnd(rawOutput.trimEnd())
       const suffix = result.code === 0 ? '' : `${output ? '\n' : ''}Exit code ${result.code ?? 1}`
       return {
@@ -83,6 +85,8 @@ export function createBashTool(options: {
         ),
       }
     },
+    getPermissionRule: (input) =>
+      typeof input.command === 'string' ? `Bash(${input.command})` : undefined,
     isConcurrencySafe: (input) =>
       typeof input.command === 'string' && isReadOnlyBashCommand(input.command),
     name: 'Bash',

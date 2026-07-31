@@ -16,8 +16,9 @@ import {
   runFirstRunOnboarding,
   runInteractiveFirstRunOnboarding,
 } from './config/first-run.js'
-import { loadSettings, type ProviderSettings } from './config/load-settings.js'
-import { addLocalPermissionRule } from './config/write-settings.js'
+import { findProjectRoot, loadSettings, type ProviderSettings } from './config/load-settings.js'
+import { ensureWorkspaceTrust } from './config/workspace-trust.js'
+import { addLocalPermissionRule, updateLocalSandboxMode } from './config/write-settings.js'
 import { createUserMessage } from './messages/create-message.js'
 import { createModelAdapter, getApiKeyEnvironmentName } from './model/create-model-adapter.js'
 import type { ModelAdapter } from './model/types.js'
@@ -25,6 +26,7 @@ import { createCanUseTool } from './permissions/can-use-tool.js'
 import { PermissionBroker } from './permissions/permission-broker.js'
 import type { PermissionMode } from './permissions/evaluate-permission.js'
 import { PermissionModeState } from './permissions/permission-mode-state.js'
+import { SessionPermissionState } from './permissions/session-permission-state.js'
 import { SessionController } from './session-controller.js'
 import {
   createSandboxRuntimeConfig,
@@ -51,6 +53,7 @@ export type StartDockOptions = {
   onboardingPrompter?: OnboardingPrompter
   sandboxManager?: SandboxManagerApi
   terminal?: Terminal
+  workspaceTrustPrompter?: (workspace: string) => Promise<boolean>
 }
 
 export async function startDock(options: StartDockOptions): Promise<void> {
@@ -59,6 +62,13 @@ export async function startDock(options: StartDockOptions): Promise<void> {
   const environment = options.environment ?? process.env
   const configDir = join(homeDir, '.dock')
   const cli = parseCliOptions(options.args)
+  const projectRoot = await findProjectRoot(cwd)
+  await ensureWorkspaceTrust({
+    cwd,
+    homeDir,
+    ...(options.workspaceTrustPrompter ? { prompter: options.workspaceTrustPrompter } : {}),
+    workspace: projectRoot,
+  })
   let loadedSettings = await loadSettings({ cwd, homeDir })
   let initialModelReference = cli.model ?? loadedSettings.settings.model
   let firstRunResult: FirstRunResult | undefined
@@ -179,25 +189,6 @@ export async function startDock(options: StartDockOptions): Promise<void> {
   const permissionMode =
     cli.permissionMode ?? loadedSettings.settings.permissions?.defaultMode ?? 'default'
   const permissionModeState = new PermissionModeState(permissionMode)
-  const canUseTool = createCanUseTool({
-    autoAllowBashIfSandboxed: () => sandbox.autoAllowBashIfSandboxed,
-    isBashSandboxed: (_tool, input) =>
-      sandbox.shouldUseSandbox({
-        ...(typeof input.command === 'string' ? { command: input.command } : {}),
-        ...(typeof input.dangerouslyDisableSandbox === 'boolean'
-          ? { dangerouslyDisableSandbox: input.dangerouslyDisableSandbox }
-          : {}),
-      }),
-    mode: () => permissionModeState.value,
-    requestApproval: (tool, input, decision, signal) =>
-      permissionBroker.requestApproval(tool, input, decision, signal),
-    rules: {
-      allow: loadedSettings.settings.permissions?.allow ?? [],
-      ask: loadedSettings.settings.permissions?.ask ?? [],
-      deny: loadedSettings.settings.permissions?.deny ?? [],
-    },
-  })
-
   const createController = async (
     targetSessionId: SessionId,
     modelReference: string,
@@ -234,6 +225,33 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       createGrepTool({ cwd }),
       createBashTool({ cwd, homeDir, sandbox }),
     ]
+    const canUseTool = createCanUseTool({
+      autoAllowBashIfSandboxed: () => sandbox.autoAllowBashIfSandboxed,
+      isBashSandboxed: (_tool, input) =>
+        sandbox.shouldUseSandbox({
+          ...(typeof input.command === 'string' ? { command: input.command } : {}),
+          ...(typeof input.dangerouslyDisableSandbox === 'boolean'
+            ? { dangerouslyDisableSandbox: input.dangerouslyDisableSandbox }
+            : {}),
+        }),
+      mode: () => permissionModeState.value,
+      persistApproval: async (rule) => {
+        await addLocalPermissionRule({
+          behavior: 'allow',
+          projectRoot: loadedSettings.projectRoot,
+          rule,
+        })
+        loadedSettings = await loadSettings({ cwd, homeDir })
+      },
+      requestApproval: (tool, input, decision, signal) =>
+        permissionBroker.requestApproval(tool, input, decision, signal),
+      rules: {
+        allow: loadedSettings.settings.permissions?.allow ?? [],
+        ask: loadedSettings.settings.permissions?.ask ?? [],
+        deny: loadedSettings.settings.permissions?.deny ?? [],
+      },
+      sessionPermissions: new SessionPermissionState(),
+    })
     const contextManager = new ContextManager({
       contextWindow: provider.contextWindow ?? 200_000,
       maxOutputTokens: provider.maxOutputTokens ?? 8_192,
@@ -306,10 +324,23 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     },
   }
   const tui = new TuiMainScreen(options.terminal ?? new ProcessTerminal())
+  const sandboxCommands = {
+    getMode: () => sandbox.mode,
+    async setMode(mode: Parameters<DockSandbox['setMode']>[0]) {
+      await sandbox.setMode(mode)
+      await updateLocalSandboxMode({
+        autoAllowBashIfSandboxed: mode !== 'regular-permissions',
+        enabled: mode !== 'off',
+        projectRoot: loadedSettings.projectRoot,
+      })
+      loadedSettings = await loadSettings({ cwd, homeDir })
+    },
+  }
   const app = new DockTuiApp({
     controller: runtime,
     permissionBroker,
     sandboxNetworkPermissionBroker,
+    sandboxCommands,
     sessionCommands,
     startupNotices: sandbox.unavailableReason ? [sandbox.unavailableReason] : [],
     tui,

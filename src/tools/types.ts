@@ -12,6 +12,7 @@ export type AgentTool = {
   description: string
   inputSchema: JsonSchema
   getPermissionSubject?: (input: JsonObject) => PermissionSubject
+  getPermissionRule?: (input: JsonObject) => string | undefined
   isConcurrencySafe: (input: JsonObject) => boolean
   execute: (
     input: JsonObject,
