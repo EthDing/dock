@@ -339,7 +339,7 @@ export function getProjectSessionsDirectory(
   return join(resolve(location.configDir), 'projects', encodeProjectPath(location.cwd))
 }
 
-function encodeProjectPath(cwd: string): string {
+export function encodeProjectPath(cwd: string): string {
   const absolutePath = resolve(cwd)
   const encoded = absolutePath.replace(/[^a-zA-Z0-9]/g, '-')
   if (encoded.length <= 200) return encoded

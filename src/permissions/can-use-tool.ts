@@ -10,6 +10,7 @@ import type { PermissionApproval } from './permission-broker.js'
 import type { SessionPermissionState } from './session-permission-state.js'
 
 export function createCanUseTool(options: {
+  autoAllowInternalToolUse?: (tool: AgentTool, input: JsonObject) => boolean
   autoAllowBashIfSandboxed?: () => boolean
   isBashSandboxed?: (tool: AgentTool, input: JsonObject) => boolean
   mode: PermissionMode | (() => PermissionMode)
@@ -36,6 +37,18 @@ export function createCanUseTool(options: {
       rules: options.rules,
       subject,
     })
+
+    if (decision.behavior === 'deny' && decision.source === 'rule') {
+      return {
+        behavior: 'deny',
+        message: `Permission denied for ${tool.name}`,
+      }
+    }
+
+    const autoAllowInternalToolUse =
+      options.autoAllowInternalToolUse?.(tool, input) === true &&
+      !(decision.behavior === 'ask' && decision.source === 'rule')
+    if (autoAllowInternalToolUse) return { behavior: 'allow' }
 
     if (decision.behavior === 'deny') {
       return {

@@ -20,6 +20,7 @@ import { findProjectRoot, loadSettings, type ProviderSettings } from './config/l
 import { ensureWorkspaceTrust } from './config/workspace-trust.js'
 import { addLocalPermissionRule, updateLocalSandboxMode } from './config/write-settings.js'
 import { createUserMessage } from './messages/create-message.js'
+import { MemoryManager } from './memory/memory-manager.js'
 import { createModelAdapter, getApiKeyEnvironmentName } from './model/create-model-adapter.js'
 import type { ModelAdapter } from './model/types.js'
 import { createCanUseTool } from './permissions/can-use-tool.js'
@@ -136,6 +137,13 @@ export async function startDock(options: StartDockOptions): Promise<void> {
   }
 
   const sandboxNetworkPermissionBroker = new SandboxNetworkPermissionBroker()
+  const memory = await MemoryManager.create({
+    configDir,
+    homeDir,
+    projectRoot: loadedSettings.projectRoot,
+    settings: loadedSettings.settings,
+  })
+  await memory.initialize()
   const sandbox = new DockSandbox({
     config: createSandboxRuntimeConfig({ cwd, homeDir, settings: loadedSettings.settings }),
     ...(options.sandboxManager ? { manager: options.sandboxManager } : {}),
@@ -180,11 +188,9 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     homeDir,
     projectRoot: loadedSettings.projectRoot,
   })
-  const userContext = {
-    AGENTS: instructionDocuments
-      .map((document) => `Contents of ${document.path}:\n\n${document.content}`)
-      .join('\n\n'),
-  }
+  const instructionContext = instructionDocuments
+    .map((document) => `Contents of ${document.path}:\n\n${document.content}`)
+    .join('\n\n')
   const permissionBroker = new PermissionBroker()
   const permissionMode =
     cli.permissionMode ?? loadedSettings.settings.permissions?.defaultMode ?? 'default'
@@ -215,8 +221,26 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       sessionId: targetSessionId,
       snapshots: existing?.fileHistorySnapshots ?? [],
     })
+    const memoryIndex = await memory.loadIndex()
+    const memoryPrompt = memory.buildSystemPrompt()
+    const userContext = {
+      ...(instructionContext ? { AGENTS: instructionContext } : {}),
+      ...(memoryIndex
+        ? {
+            AUTO_MEMORY: `Contents of ${memory.entrypoint} (auto memory index, persisted across conversations):\n\n${memoryIndex.content}`,
+          }
+        : {}),
+    }
     const readFileState = new FileReadState()
-    const fileDependencies = { cwd, fileHistory, readFileState }
+    const fileDependencies = {
+      cwd,
+      fileHistory,
+      readFileState,
+      writeLifecycle: {
+        afterWrite: (filePath: string, content: string) => memory.inspectWrite(filePath, content),
+        prepareWrite: (filePath: string, content: string) => memory.prepareWrite(filePath, content),
+      },
+    }
     const tools = [
       createReadTool(fileDependencies),
       createWriteTool(fileDependencies),
@@ -226,6 +250,10 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       createBashTool({ cwd, homeDir, sandbox }),
     ]
     const canUseTool = createCanUseTool({
+      autoAllowInternalToolUse: (tool, input) =>
+        ['Read', 'Write', 'Edit'].includes(tool.name) &&
+        typeof input.file_path === 'string' &&
+        memory.isMemoryPath(input.file_path),
       autoAllowBashIfSandboxed: () => sandbox.autoAllowBashIfSandboxed,
       isBashSandboxed: (_tool, input) =>
         sandbox.shouldUseSandbox({
@@ -269,9 +297,10 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       permissionModeState,
       systemPrompt: [
         'You are Dock, an interactive coding agent. Read the project, use tools to act, and verify your work.',
+        ...(memoryPrompt ? [memoryPrompt] : []),
       ],
       tools,
-      userContext,
+      ...(Object.keys(userContext).length > 0 ? { userContext } : {}),
       writer,
     })
   }

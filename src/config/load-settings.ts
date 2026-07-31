@@ -61,6 +61,8 @@ const sandboxSettingsSchema = z
 
 const settingsSchema = z
   .object({
+    autoMemoryDirectory: z.string().min(1).optional(),
+    autoMemoryEnabled: z.boolean().optional(),
     cleanupPeriodDays: z.number().int().nonnegative().optional(),
     model: z.string().min(1).optional(),
     permissions: z

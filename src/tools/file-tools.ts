@@ -4,13 +4,22 @@ import { z } from 'zod'
 import type { FileHistory } from '../checkpoint/file-history.js'
 import type { JsonObject } from '../model/types.js'
 import { matchesPathSpecifier } from '../permissions/specifier-matching.js'
-import type { AgentTool } from './types.js'
+import type { AgentTool, AgentToolResult } from './types.js'
 import type { FileReadState } from './file-read-state.js'
 
 type FileToolDependencies = {
   cwd: string
   fileHistory: FileHistory
   readFileState: FileReadState
+  writeLifecycle?: FileWriteLifecycle
+}
+
+export type FileWriteLifecycle = {
+  afterWrite?: (
+    filePath: string,
+    content: string,
+  ) => Promise<AgentToolResult | undefined> | AgentToolResult | undefined
+  prepareWrite?: (filePath: string, content: string) => Promise<string> | string
 }
 
 const readInputSchema = z.strictObject({
@@ -94,16 +103,25 @@ export function createWriteTool(dependencies: FileToolDependencies): AgentTool {
       const parsed = writeInputSchema.parse(input)
       const filePath = absolutePath(parsed.file_path)
       await assertSafeToWriteExisting(filePath, dependencies.readFileState)
+      const content =
+        (await dependencies.writeLifecycle?.prepareWrite?.(filePath, parsed.content)) ??
+        parsed.content
       await dependencies.fileHistory.trackEdit(filePath, parentMessageUuid)
       await mkdir(dirname(filePath), { recursive: true })
-      await writeFile(filePath, parsed.content, 'utf8')
+      await writeFile(filePath, content, 'utf8')
       const fileStats = await stat(filePath)
       dependencies.readFileState.set(filePath, {
-        content: parsed.content,
+        content,
         isPartialView: false,
         timestamp: fileStats.mtimeMs,
       })
-      return { content: `Wrote ${filePath}` }
+      const feedback = await dependencies.writeLifecycle?.afterWrite?.(filePath, content)
+      return feedback
+        ? {
+            content: `Wrote ${filePath}\n${feedback.content}`,
+            ...(feedback.isError === undefined ? {} : { isError: feedback.isError }),
+          }
+        : { content: `Wrote ${filePath}` }
     },
     inputSchema: {
       additionalProperties: false,
@@ -157,9 +175,11 @@ export function createEditTool(dependencies: FileToolDependencies): AgentTool {
       if (occurrences > 1 && !parsed.replace_all) {
         throw new Error(`Found ${occurrences} matches but replace_all is false`)
       }
-      const updated = parsed.replace_all
+      const replaced = parsed.replace_all
         ? content.replaceAll(parsed.old_string, parsed.new_string)
         : content.replace(parsed.old_string, parsed.new_string)
+      const updated =
+        (await dependencies.writeLifecycle?.prepareWrite?.(filePath, replaced)) ?? replaced
       await dependencies.fileHistory.trackEdit(filePath, parentMessageUuid)
       await mkdir(dirname(filePath), { recursive: true })
       await writeFile(filePath, updated, 'utf8')
@@ -169,7 +189,13 @@ export function createEditTool(dependencies: FileToolDependencies): AgentTool {
         isPartialView: false,
         timestamp: fileStats.mtimeMs,
       })
-      return { content: `Updated ${filePath}` }
+      const feedback = await dependencies.writeLifecycle?.afterWrite?.(filePath, updated)
+      return feedback
+        ? {
+            content: `Updated ${filePath}\n${feedback.content}`,
+            ...(feedback.isError === undefined ? {} : { isError: feedback.isError }),
+          }
+        : { content: `Updated ${filePath}` }
     },
     inputSchema: {
       additionalProperties: false,

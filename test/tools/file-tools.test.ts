@@ -102,4 +102,48 @@ describe('file tools', () => {
 
     expect(await readFile(filePath, 'utf8')).toBe('created')
   })
+
+  it('runs the write lifecycle for both Write and Edit and returns its feedback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dock-file-lifecycle-'))
+    const cwd = join(root, 'project')
+    await mkdir(cwd, { recursive: true })
+    const fileHistory = new FileHistory({
+      configDir: join(root, 'config'),
+      cwd,
+      sessionId: SESSION_ID,
+    })
+    await fileHistory.makeSnapshot(USER_UUID)
+    const readFileState = new FileReadState()
+    const dependencies = {
+      cwd,
+      fileHistory,
+      readFileState,
+      writeLifecycle: {
+        afterWrite: () => ({ content: 'memory feedback', isError: true }),
+        prepareWrite: (_path: string, content: string) => `${content}\nprepared`,
+      },
+    }
+    const write = createWriteTool(dependencies)
+    const read = createReadTool(dependencies)
+    const edit = createEditTool(dependencies)
+    const filePath = join(cwd, 'memory.md')
+
+    const writeResult = await write.execute(
+      { file_path: filePath, content: 'created' },
+      executionOptions,
+    )
+    expect(writeResult).toEqual({
+      content: `Wrote ${filePath}\nmemory feedback`,
+      isError: true,
+    })
+    expect(await readFile(filePath, 'utf8')).toBe('created\nprepared')
+
+    await read.execute({ file_path: filePath }, executionOptions)
+    const editResult = await edit.execute(
+      { file_path: filePath, old_string: 'created', new_string: 'updated' },
+      executionOptions,
+    )
+    expect(editResult.isError).toBe(true)
+    expect(await readFile(filePath, 'utf8')).toBe('updated\nprepared\nprepared')
+  })
 })

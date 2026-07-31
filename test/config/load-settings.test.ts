@@ -33,6 +33,7 @@ describe('loadSettings', () => {
     await writeFile(
       join(projectDir, '.dock', 'settings.json'),
       JSON.stringify({
+        autoMemoryEnabled: false,
         permissions: { allow: ['Bash(pnpm test)'] },
         providers: { primary: { baseUrl: 'https://gateway.example' } },
         sandbox: {
@@ -57,6 +58,7 @@ describe('loadSettings', () => {
 
     expect(loaded.projectRoot).toBe(projectDir)
     expect(loaded.settings).toEqual({
+      autoMemoryEnabled: false,
       model: 'local-model',
       permissions: {
         allow: ['Read', 'Bash(pnpm test)'],

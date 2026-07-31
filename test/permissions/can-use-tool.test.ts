@@ -132,4 +132,43 @@ describe('createCanUseTool', () => {
     expect(persistApproval).toHaveBeenCalledWith('Bash(pnpm test)')
     expect(requestApproval).toHaveBeenCalledOnce()
   })
+
+  it('auto-allows internal calls across modes while preserving explicit rules', async () => {
+    const requestApproval = vi.fn(async () => ({ behavior: 'allow_once' as const }))
+    const internalWrite = tool('Write', false)
+    const autoAllowInternalToolUse = () => true
+
+    const plan = createCanUseTool({
+      autoAllowInternalToolUse,
+      mode: 'plan',
+      requestApproval,
+      rules: {},
+    })
+    await expect(plan(internalWrite, { file_path: '/memory/topic.md' }, context)).resolves.toEqual({
+      behavior: 'allow',
+    })
+
+    const denied = createCanUseTool({
+      autoAllowInternalToolUse,
+      mode: 'default',
+      requestApproval,
+      rules: { deny: ['Write'] },
+    })
+    await expect(
+      denied(internalWrite, { file_path: '/memory/topic.md' }, context),
+    ).resolves.toMatchObject({ behavior: 'deny' })
+
+    const asked = createCanUseTool({
+      autoAllowInternalToolUse,
+      mode: 'default',
+      requestApproval,
+      rules: { ask: ['Write'] },
+    })
+    await expect(asked(internalWrite, { file_path: '/memory/topic.md' }, context)).resolves.toEqual(
+      {
+        behavior: 'allow',
+      },
+    )
+    expect(requestApproval).toHaveBeenCalledOnce()
+  })
 })
