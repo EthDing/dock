@@ -20,6 +20,7 @@ export class SessionController {
   readonly #canUseTool: CanUseTool | undefined
   readonly #contextManager: ContextManager | undefined
   readonly #permissionModeState: PermissionModeState | undefined
+  readonly #turnComplete: TurnCompleteWork | undefined
   #messages: TranscriptMessage[]
   #activeAbortController: AbortController | undefined
   #closed = false
@@ -35,6 +36,7 @@ export class SessionController {
     permissionModeState?: PermissionModeState
     systemPrompt: readonly string[]
     tools: readonly AgentTool[]
+    turnComplete?: TurnCompleteWork
     userContext?: Readonly<Record<string, string>>
     writer: SessionWriter
   }) {
@@ -48,6 +50,7 @@ export class SessionController {
     this.#permissionModeState = options.permissionModeState
     this.#systemPrompt = options.systemPrompt
     this.#tools = options.tools
+    this.#turnComplete = options.turnComplete
     this.#userContext = options.userContext
     this.#writer = options.writer
   }
@@ -93,6 +96,7 @@ export class SessionController {
       }
       this.#messages = [...next.value.messages]
       await this.#writer.recordTranscript(this.#messages)
+      if (next.value.reason === 'completed') this.#turnComplete?.schedule(this.#messages)
       return next.value
     } finally {
       this.#activeAbortController = undefined
@@ -162,10 +166,16 @@ export class SessionController {
     if (this.#closed) return
     this.abort('shutdown')
     this.#closed = true
+    await this.#turnComplete?.drain()
     await this.#writer.close()
   }
 
   #assertOpen(): void {
     if (this.#closed) throw new Error('Session controller is closed')
   }
+}
+
+export type TurnCompleteWork = {
+  drain: (timeoutMs?: number) => Promise<void>
+  schedule: (messages: readonly TranscriptMessage[]) => void
 }

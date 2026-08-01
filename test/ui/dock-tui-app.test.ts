@@ -7,6 +7,7 @@ import {
 } from '../../src/ui/dock-tui-app.js'
 import { SandboxNetworkPermissionBroker } from '../../src/sandbox/network-permission-broker.js'
 import type { DockSandboxMode } from '../../src/sandbox/dock-sandbox.js'
+import { MemoryNotificationBroker } from '../../src/memory/memory-notification-broker.js'
 
 class MemoryTerminal implements Terminal {
   columns = 80
@@ -36,6 +37,24 @@ class MemoryTerminal implements Terminal {
 }
 
 describe('DockTuiApp', () => {
+  it('renders background memory notifications without a submitted turn', async () => {
+    const controller: DockUiController = {
+      abort: () => {},
+      close: async () => {},
+      async *submit() {},
+    }
+    const memoryNotificationBroker = new MemoryNotificationBroker()
+    const tui = new TuiMainScreen(new MemoryTerminal())
+    new DockTuiApp({ controller, memoryNotificationBroker, tui })
+
+    memoryNotificationBroker.notify({
+      paths: ['/memory/feedback.md', '/memory/user.md'],
+      type: 'saved',
+    })
+
+    expect(tui.render(80).join('\n')).toContain('Saved 2 memories')
+  })
+
   it('renders submitted user text and streamed assistant text', async () => {
     const controller: DockUiController = {
       abort: () => {},

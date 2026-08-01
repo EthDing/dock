@@ -20,7 +20,9 @@ import { findProjectRoot, loadSettings, type ProviderSettings } from './config/l
 import { ensureWorkspaceTrust } from './config/workspace-trust.js'
 import { addLocalPermissionRule, updateLocalSandboxMode } from './config/write-settings.js'
 import { createUserMessage } from './messages/create-message.js'
+import { ExtractMemories } from './memory/extract-memories.js'
 import { MemoryManager } from './memory/memory-manager.js'
+import { MemoryNotificationBroker } from './memory/memory-notification-broker.js'
 import { createModelAdapter, getApiKeyEnvironmentName } from './model/create-model-adapter.js'
 import type { ModelAdapter } from './model/types.js'
 import { createCanUseTool } from './permissions/can-use-tool.js'
@@ -137,6 +139,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
   }
 
   const sandboxNetworkPermissionBroker = new SandboxNetworkPermissionBroker()
+  const memoryNotificationBroker = new MemoryNotificationBroker()
   const memory = await MemoryManager.create({
     configDir,
     homeDir,
@@ -249,6 +252,20 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       createGrepTool({ cwd }),
       createBashTool({ cwd, homeDir, sandbox }),
     ]
+    const extractorFileDependencies = {
+      cwd,
+      fileHistory: { trackEdit: async () => {} },
+      readFileState: new FileReadState(),
+      writeLifecycle: fileDependencies.writeLifecycle,
+    }
+    const extractorTools = [
+      createReadTool(extractorFileDependencies),
+      createWriteTool(extractorFileDependencies),
+      createEditTool(extractorFileDependencies),
+      createGlobTool({ cwd }),
+      createGrepTool({ cwd }),
+      createBashTool({ cwd, homeDir, sandbox }),
+    ]
     const canUseTool = createCanUseTool({
       autoAllowInternalToolUse: (tool, input) =>
         ['Read', 'Write', 'Edit'].includes(tool.name) &&
@@ -286,6 +303,22 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       summarize: ({ instructions, transcript }) =>
         summarizeWithModel(model, modelId, transcript, instructions),
     })
+    const systemPrompt = [
+      'You are Dock, an interactive coding agent. Read the project, use tools to act, and verify your work.',
+      ...(memoryPrompt ? [memoryPrompt] : []),
+    ]
+    const extractMemories = memory.enabled
+      ? new ExtractMemories({
+          memory,
+          model,
+          modelId,
+          onSaved: (paths) => memoryNotificationBroker.notify({ paths, type: 'saved' }),
+          systemPrompt,
+          tools: extractorTools,
+          ...(Object.keys(userContext).length > 0 ? { userContext } : {}),
+          ...(provider.maxOutputTokens ? { maxOutputTokens: provider.maxOutputTokens } : {}),
+        })
+      : undefined
     return new SessionController({
       canUseTool,
       contextManager,
@@ -295,11 +328,9 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       model,
       modelId,
       permissionModeState,
-      systemPrompt: [
-        'You are Dock, an interactive coding agent. Read the project, use tools to act, and verify your work.',
-        ...(memoryPrompt ? [memoryPrompt] : []),
-      ],
+      systemPrompt,
       tools,
+      ...(extractMemories ? { turnComplete: extractMemories } : {}),
       ...(Object.keys(userContext).length > 0 ? { userContext } : {}),
       writer,
     })
@@ -367,6 +398,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
   }
   const app = new DockTuiApp({
     controller: runtime,
+    memoryNotificationBroker,
     permissionBroker,
     sandboxNetworkPermissionBroker,
     sandboxCommands,

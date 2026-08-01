@@ -100,7 +100,7 @@ export class MemoryManager {
 
 You have a persistent, file-based memory system at \`${this.directory}\`. This directory already exists. Use the Read, Write, and Edit tools directly; do not run mkdir or check whether it exists.
 
-Store one durable fact per Markdown topic file with frontmatter containing \`name\`, \`description\`, and \`type\`. The type must be one of: \`user\`, \`feedback\`, \`project\`, or \`reference\`.
+Store one durable fact per Markdown topic file with frontmatter containing \`name\`, \`description\`, and \`type\`. \`name\` must be a short kebab-case slug. The type must be one of: \`user\`, \`feedback\`, \`project\`, or \`reference\`.
 
 - user: the user's role, expertise, and working preferences
 - feedback: corrections and confirmed approaches, including why and how to apply them

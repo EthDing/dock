@@ -1,6 +1,10 @@
 import { Editor, Key, Markdown, SelectList, Spacer, Text, matchesKey, type TUI } from '@dock/tui'
 import type { AgentEvent } from '../agent/run-agent-loop.js'
 import type {
+  MemoryNotification,
+  MemoryNotificationBroker,
+} from '../memory/memory-notification-broker.js'
+import type {
   PermissionApproval,
   PermissionBroker,
   PermissionRequest,
@@ -65,6 +69,7 @@ export class DockTuiApp {
 
   constructor(options: {
     controller: DockUiController
+    memoryNotificationBroker?: MemoryNotificationBroker
     permissionBroker?: PermissionBroker
     sandboxNetworkPermissionBroker?: SandboxNetworkPermissionBroker
     sandboxCommands?: DockSandboxCommands
@@ -129,6 +134,9 @@ export class DockTuiApp {
     options.permissionBroker?.setHandler((request) => this.#requestPermission(request))
     options.sandboxNetworkPermissionBroker?.setHandler((request) =>
       this.#requestSandboxNetwork(request),
+    )
+    options.memoryNotificationBroker?.setHandler((notification) =>
+      this.#renderMemoryNotification(notification),
     )
   }
 
@@ -280,6 +288,13 @@ export class DockTuiApp {
 
   #insertTranscript(component: Markdown | Text): void {
     this.#tui.children.splice(this.#tui.children.length - 2, 0, component)
+  }
+
+  #renderMemoryNotification(notification: MemoryNotification): void {
+    if (notification.type !== 'saved') return
+    const count = notification.paths.length
+    this.#insertTranscript(new Text(`Saved ${count} ${count === 1 ? 'memory' : 'memories'}`, 1, 0))
+    this.#tui.requestRender()
   }
 
   #renderToolStart(toolUse: ToolUseBlock): void {

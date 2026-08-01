@@ -141,4 +141,19 @@ describe('MemoryManager', () => {
     await expect(manager.loadIndex()).resolves.toBeUndefined()
     await expect(readFile(manager.entrypoint, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
+
+  it('publishes the typed topic-file and concise-index contract', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dock-memory-prompt-'))
+    const manager = await MemoryManager.create({
+      configDir: join(root, '.dock'),
+      homeDir: root,
+      projectRoot: join(root, 'repo'),
+      settings: {},
+    })
+
+    const prompt = manager.buildSystemPrompt()
+    expect(prompt).toContain('short kebab-case slug')
+    expect(prompt).toContain('user`, `feedback`, `project`, or `reference')
+    expect(prompt).toContain('MEMORY.md is only an index')
+  })
 })

@@ -9,7 +9,7 @@ import type { FileReadState } from './file-read-state.js'
 
 type FileToolDependencies = {
   cwd: string
-  fileHistory: FileHistory
+  fileHistory: Pick<FileHistory, 'trackEdit'>
   readFileState: FileReadState
   writeLifecycle?: FileWriteLifecycle
 }
