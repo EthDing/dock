@@ -8,6 +8,8 @@ import {
 import { SandboxNetworkPermissionBroker } from '../../src/sandbox/network-permission-broker.js'
 import type { DockSandboxMode } from '../../src/sandbox/dock-sandbox.js'
 import { MemoryNotificationBroker } from '../../src/memory/memory-notification-broker.js'
+import { PermissionBroker } from '../../src/permissions/permission-broker.js'
+import type { AgentTool } from '../../src/tools/types.js'
 
 class MemoryTerminal implements Terminal {
   columns = 80
@@ -37,6 +39,60 @@ class MemoryTerminal implements Terminal {
 }
 
 describe('DockTuiApp', () => {
+  it('offers permanent approval only when the tool provides a persistent rule', async () => {
+    const controller: DockUiController = {
+      abort: () => {},
+      close: async () => {},
+      async *submit() {},
+    }
+    const permissionBroker = new PermissionBroker()
+    const terminal = new MemoryTerminal()
+    const tui = new TuiMainScreen(terminal)
+    const app = new DockTuiApp({ controller, permissionBroker, tui })
+    app.start()
+    const abortController = new AbortController()
+    const write: AgentTool = {
+      description: 'Write',
+      execute: async () => ({ content: '' }),
+      inputSchema: { type: 'object' },
+      isConcurrencySafe: () => false,
+      name: 'Write',
+    }
+
+    const writeApproval = permissionBroker.requestApproval(
+      write,
+      { file_path: '/work/file.ts' },
+      { behavior: 'ask', source: 'fallback' },
+      abortController.signal,
+    )
+    await Promise.resolve()
+    terminal.send('\u001b[B')
+    terminal.send('\u001b[B')
+    terminal.send('\r')
+    await expect(writeApproval).resolves.toEqual({ behavior: 'deny' })
+
+    const bash: AgentTool = {
+      ...write,
+      getPermissionRule: (input) => `Bash(${String(input.command)})`,
+      name: 'Bash',
+    }
+    const bashApproval = permissionBroker.requestApproval(
+      bash,
+      { command: 'pnpm test' },
+      { behavior: 'ask', source: 'fallback' },
+      abortController.signal,
+    )
+    await Promise.resolve()
+    terminal.send('\u001b[B')
+    terminal.send('\u001b[B')
+    terminal.send('\r')
+    await expect(bashApproval).resolves.toEqual({
+      behavior: 'allow_always',
+      rule: 'Bash(pnpm test)',
+    })
+    await app.stop()
+  })
+
   it('renders background memory notifications without a submitted turn', async () => {
     const controller: DockUiController = {
       abort: () => {},

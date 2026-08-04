@@ -27,7 +27,11 @@ import { createModelAdapter, getApiKeyEnvironmentName } from './model/create-mod
 import type { ModelAdapter } from './model/types.js'
 import { createCanUseTool } from './permissions/can-use-tool.js'
 import { PermissionBroker } from './permissions/permission-broker.js'
-import type { PermissionMode } from './permissions/evaluate-permission.js'
+import {
+  filterDeniedTools,
+  type PermissionMode,
+  type PermissionRules,
+} from './permissions/evaluate-permission.js'
 import { PermissionModeState } from './permissions/permission-mode-state.js'
 import { SessionPermissionState } from './permissions/session-permission-state.js'
 import { SessionController } from './session-controller.js'
@@ -244,28 +248,39 @@ export async function startDock(options: StartDockOptions): Promise<void> {
         prepareWrite: (filePath: string, content: string) => memory.prepareWrite(filePath, content),
       },
     }
-    const tools = [
-      createReadTool(fileDependencies),
-      createWriteTool(fileDependencies),
-      createEditTool(fileDependencies),
-      createGlobTool({ cwd }),
-      createGrepTool({ cwd }),
-      createBashTool({ cwd, homeDir, sandbox }),
-    ]
+    const permissionRules: PermissionRules = {
+      allow: loadedSettings.settings.permissions?.allow ?? [],
+      ask: loadedSettings.settings.permissions?.ask ?? [],
+      deny: loadedSettings.settings.permissions?.deny ?? [],
+    }
+    const tools = filterDeniedTools(
+      [
+        createReadTool(fileDependencies),
+        createWriteTool(fileDependencies),
+        createEditTool(fileDependencies),
+        createGlobTool({ cwd }),
+        createGrepTool({ cwd }),
+        createBashTool({ cwd, homeDir, sandbox }),
+      ],
+      permissionRules,
+    )
     const extractorFileDependencies = {
       cwd,
       fileHistory: { trackEdit: async () => {} },
       readFileState: new FileReadState(),
       writeLifecycle: fileDependencies.writeLifecycle,
     }
-    const extractorTools = [
-      createReadTool(extractorFileDependencies),
-      createWriteTool(extractorFileDependencies),
-      createEditTool(extractorFileDependencies),
-      createGlobTool({ cwd }),
-      createGrepTool({ cwd }),
-      createBashTool({ cwd, homeDir, sandbox }),
-    ]
+    const extractorTools = filterDeniedTools(
+      [
+        createReadTool(extractorFileDependencies),
+        createWriteTool(extractorFileDependencies),
+        createEditTool(extractorFileDependencies),
+        createGlobTool({ cwd }),
+        createGrepTool({ cwd }),
+        createBashTool({ cwd, homeDir, sandbox }),
+      ],
+      permissionRules,
+    )
     const canUseTool = createCanUseTool({
       autoAllowInternalToolUse: (tool, input) =>
         ['Read', 'Write', 'Edit'].includes(tool.name) &&
@@ -290,11 +305,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       },
       requestApproval: (tool, input, decision, signal) =>
         permissionBroker.requestApproval(tool, input, decision, signal),
-      rules: {
-        allow: loadedSettings.settings.permissions?.allow ?? [],
-        ask: loadedSettings.settings.permissions?.ask ?? [],
-        deny: loadedSettings.settings.permissions?.deny ?? [],
-      },
+      rules: permissionRules,
       sessionPermissions: new SessionPermissionState(),
     })
     const contextManager = new ContextManager({

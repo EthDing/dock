@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 import fg from 'fast-glob'
 import { z } from 'zod'
+import { findContentRule } from '../permissions/evaluate-permission.js'
 import { matchesWildcard } from '../permissions/specifier-matching.js'
 import type { AgentTool } from './types.js'
 
@@ -39,7 +40,7 @@ const grepInputSchema = z.strictObject({
 
 export function createGlobTool(options: { cwd: string }): AgentTool {
   const cwd = resolve(options.cwd)
-  return {
+  const tool: AgentTool = {
     description: 'Finds files by glob pattern.',
     async execute(input, { signal }) {
       const parsed = globInputSchema.parse(input)
@@ -72,22 +73,17 @@ export function createGlobTool(options: { cwd: string }): AgentTool {
       required: ['pattern'],
       type: 'object',
     },
-    getPermissionSubject: (input) => ({
-      isInWorkingDirectory: isPathWithin(cwd, resolve(cwd, optionalPath(input.path) ?? '.')),
-      isReadOnly: true,
-      matchesSpecifier: (pattern) =>
-        typeof input.pattern === 'string' && matchesWildcard(pattern, input.pattern),
-      name: 'Glob',
-      requiresBypassConfirmation: false,
-    }),
+    checkPermissions: (input, context) => checkSearchPermission(tool, input, context, cwd),
     isConcurrencySafe: () => true,
     name: 'Glob',
+    parseInput: (input) => globInputSchema.parse(input),
   }
+  return tool
 }
 
 export function createGrepTool(options: { cwd: string }): AgentTool {
   const cwd = resolve(options.cwd)
-  return {
+  const tool: AgentTool = {
     description: 'Searches file contents with ripgrep.',
     async execute(input, { signal }) {
       const parsed = grepInputSchema.parse(input)
@@ -144,17 +140,49 @@ export function createGrepTool(options: { cwd: string }): AgentTool {
       required: ['pattern'],
       type: 'object',
     },
-    getPermissionSubject: (input) => ({
-      isInWorkingDirectory: isPathWithin(cwd, resolve(cwd, optionalPath(input.path) ?? '.')),
-      isReadOnly: true,
-      matchesSpecifier: (pattern) =>
-        typeof input.pattern === 'string' && matchesWildcard(pattern, input.pattern),
-      name: 'Grep',
-      requiresBypassConfirmation: false,
-    }),
+    checkPermissions: (input, context) => checkSearchPermission(tool, input, context, cwd),
     isConcurrencySafe: () => true,
     name: 'Grep',
+    parseInput: (input) => grepInputSchema.parse(input),
   }
+  return tool
+}
+
+function checkSearchPermission(
+  tool: AgentTool,
+  input: Parameters<NonNullable<AgentTool['checkPermissions']>>[0],
+  context: Parameters<NonNullable<AgentTool['checkPermissions']>>[1],
+  cwd: string,
+): ReturnType<NonNullable<AgentTool['checkPermissions']>> {
+  const matchesSpecifier = (pattern: string) =>
+    typeof input.pattern === 'string' && matchesWildcard(pattern, input.pattern)
+  const denyRule = findContentRule(context.rules, 'deny', tool.name, matchesSpecifier)
+  if (denyRule) {
+    return {
+      behavior: 'deny',
+      message: `Permission denied for ${tool.name}`,
+      rule: denyRule,
+      source: 'rule',
+    }
+  }
+  const askRule = findContentRule(context.rules, 'ask', tool.name, matchesSpecifier)
+  if (askRule) {
+    return {
+      behavior: 'ask',
+      message: `Permission required for ${tool.name}`,
+      rule: askRule,
+      source: 'rule',
+    }
+  }
+  const target = resolve(cwd, optionalPath(input.path) ?? '.')
+  if (context.mode !== 'dontAsk' && isPathWithin(cwd, target)) {
+    return { behavior: 'allow', source: 'mode', updatedInput: input }
+  }
+  const allowRule = findContentRule(context.rules, 'allow', tool.name, matchesSpecifier)
+  if (allowRule) {
+    return { behavior: 'allow', rule: allowRule, source: 'rule', updatedInput: input }
+  }
+  return { behavior: 'passthrough', source: 'tool', updatedInput: input }
 }
 
 function optionalPath(value: unknown): string | undefined {

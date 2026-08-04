@@ -326,7 +326,8 @@ function partitionToolUses(
     let isConcurrencySafe = false
     if (tool) {
       try {
-        isConcurrencySafe = tool.isConcurrencySafe(toolUse.input)
+        const parsedInput = tool.parseInput?.(toolUse.input) ?? toolUse.input
+        isConcurrencySafe = tool.isConcurrencySafe(parsedInput)
       } catch {
         isConcurrencySafe = false
       }
@@ -356,7 +357,20 @@ async function executeToolUse(
   if (!tool) {
     result = { content: `Unknown tool: ${toolUse.name}`, isError: true }
   } else {
-    const decision = await canUseTool?.(tool, toolUse.input, {
+    let parsedInput: JsonObject
+    try {
+      // Validation must happen before permission handling so malformed calls
+      // cannot trigger misleading approval prompts.
+      parsedInput = tool.parseInput?.(toolUse.input) ?? toolUse.input
+    } catch (error) {
+      return {
+        content: `Invalid input for ${tool.name}: ${error instanceof Error ? error.message : String(error)}`,
+        isError: true,
+        toolUseId: toolUse.id,
+        type: 'tool_result',
+      }
+    }
+    const decision = await canUseTool?.(tool, parsedInput, {
       parentMessageUuid,
       signal,
       toolUseId: toolUse.id,
@@ -370,11 +384,14 @@ async function executeToolUse(
       }
     }
     try {
-      result = await tool.execute(toolUse.input, {
-        parentMessageUuid,
-        signal,
-        toolUseId: toolUse.id,
-      })
+      result = await tool.execute(
+        decision?.behavior === 'allow' ? (decision.updatedInput ?? parsedInput) : parsedInput,
+        {
+          parentMessageUuid,
+          signal,
+          toolUseId: toolUse.id,
+        },
+      )
     } catch (error) {
       result = {
         content: error instanceof Error ? error.message : String(error),

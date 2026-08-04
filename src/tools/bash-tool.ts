@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { resolve } from 'node:path'
 import { z } from 'zod'
+import { findContentRule } from '../permissions/evaluate-permission.js'
 import { matchesCommandSpecifier } from '../permissions/specifier-matching.js'
 import type { AgentTool } from './types.js'
 
@@ -28,7 +29,7 @@ export function createBashTool(options: {
   sandbox?: BashSandboxRuntime
 }): AgentTool {
   const cwd = resolve(options.cwd)
-  return {
+  const tool: AgentTool = {
     description: 'Executes a shell command in the project environment.',
     async execute(input, { signal, toolUseId }) {
       const parsed = inputSchema.parse(input)
@@ -72,25 +73,58 @@ export function createBashTool(options: {
       required: ['command'],
       type: 'object',
     },
-    getPermissionSubject: (input) => {
+    checkPermissions: (input, context) => {
       const command = typeof input.command === 'string' ? input.command : ''
-      return {
-        isInWorkingDirectory: true,
-        isReadOnly: isReadOnlyBashCommand(command),
-        matchesSpecifier: (pattern) => matchesCommandSpecifier(pattern, command),
-        name: 'Bash',
-        requiresBypassConfirmation: requiresBypassConfirmation(
-          command,
-          options.homeDir ?? process.env.HOME ?? '',
-        ),
+      const matchesSpecifier = (pattern: string) => matchesCommandSpecifier(pattern, command)
+      const denyRule = findContentRule(context.rules, 'deny', tool.name, matchesSpecifier)
+      if (denyRule) {
+        return {
+          behavior: 'deny',
+          message: 'Permission denied for Bash',
+          rule: denyRule,
+          source: 'rule',
+        }
       }
+      const askRule = findContentRule(context.rules, 'ask', tool.name, matchesSpecifier)
+      if (askRule) {
+        return {
+          behavior: 'ask',
+          message: 'Permission required for Bash',
+          rule: askRule,
+          source: 'rule',
+        }
+      }
+      if (requiresBypassConfirmation(command, options.homeDir ?? process.env.HOME ?? '')) {
+        return {
+          behavior: 'ask',
+          message: 'Recursive deletion of a critical path requires confirmation',
+          source: 'circuit_breaker',
+        }
+      }
+      if (
+        context.mode !== 'plan' &&
+        context.autoAllowBashIfSandboxed?.() === true &&
+        context.isBashSandboxed?.(tool, input) === true
+      ) {
+        return { behavior: 'allow', source: 'internal', updatedInput: input }
+      }
+      if (context.mode !== 'dontAsk' && isReadOnlyBashCommand(command)) {
+        return { behavior: 'allow', source: 'tool', updatedInput: input }
+      }
+      const allowRule = findContentRule(context.rules, 'allow', tool.name, matchesSpecifier)
+      if (allowRule) {
+        return { behavior: 'allow', rule: allowRule, source: 'rule', updatedInput: input }
+      }
+      return { behavior: 'passthrough', source: 'tool', updatedInput: input }
     },
     getPermissionRule: (input) =>
       typeof input.command === 'string' ? `Bash(${input.command})` : undefined,
     isConcurrencySafe: (input) =>
       typeof input.command === 'string' && isReadOnlyBashCommand(input.command),
     name: 'Bash',
+    parseInput: (input) => inputSchema.parse(input),
   }
+  return tool
 }
 
 export function isReadOnlyBashCommand(command: string): boolean {

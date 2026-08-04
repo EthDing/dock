@@ -3,6 +3,7 @@ import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { z } from 'zod'
 import type { FileHistory } from '../checkpoint/file-history.js'
 import type { JsonObject } from '../model/types.js'
+import { findContentRule } from '../permissions/evaluate-permission.js'
 import { matchesPathSpecifier } from '../permissions/specifier-matching.js'
 import type { AgentTool, AgentToolResult } from './types.js'
 import type { FileReadState } from './file-read-state.js'
@@ -41,7 +42,7 @@ const editInputSchema = z.strictObject({
 })
 
 export function createReadTool(dependencies: FileToolDependencies): AgentTool {
-  return {
+  const tool: AgentTool = {
     description: 'Reads a text file from the local filesystem. file_path must be an absolute path.',
     async execute(input, { signal }) {
       throwIfAborted(signal)
@@ -79,24 +80,18 @@ export function createReadTool(dependencies: FileToolDependencies): AgentTool {
       required: ['file_path'],
       type: 'object',
     },
-    getPermissionSubject: (input) => ({
-      isInWorkingDirectory:
-        typeof input.file_path === 'string' && isPathWithin(dependencies.cwd, input.file_path),
-      isReadOnly: true,
-      matchesSpecifier: (pattern) =>
-        typeof input.file_path === 'string' &&
-        matchesPathSpecifier(pattern, input.file_path, dependencies.cwd),
-      name: 'Read',
-      requiresBypassConfirmation: false,
-    }),
+    checkPermissions: (input, context) =>
+      checkFilePermission(tool, input, context, dependencies.cwd, true),
     getPermissionRule: (input) => filePermissionRule('Read', input.file_path),
     isConcurrencySafe: () => true,
     name: 'Read',
+    parseInput: (input) => readInputSchema.parse(input),
   }
+  return tool
 }
 
 export function createWriteTool(dependencies: FileToolDependencies): AgentTool {
-  return {
+  const tool: AgentTool = {
     description: 'Writes a file to the local filesystem. file_path must be an absolute path.',
     async execute(input, { parentMessageUuid, signal }) {
       throwIfAborted(signal)
@@ -132,24 +127,17 @@ export function createWriteTool(dependencies: FileToolDependencies): AgentTool {
       required: ['file_path', 'content'],
       type: 'object',
     },
-    getPermissionSubject: (input) => ({
-      isInWorkingDirectory:
-        typeof input.file_path === 'string' && isPathWithin(dependencies.cwd, input.file_path),
-      isReadOnly: false,
-      matchesSpecifier: (pattern) =>
-        typeof input.file_path === 'string' &&
-        matchesPathSpecifier(pattern, input.file_path, dependencies.cwd),
-      name: 'Write',
-      requiresBypassConfirmation: false,
-    }),
-    getPermissionRule: (input) => filePermissionRule('Write', input.file_path),
+    checkPermissions: (input, context) =>
+      checkFilePermission(tool, input, context, dependencies.cwd, false),
     isConcurrencySafe: () => false,
     name: 'Write',
+    parseInput: (input) => writeInputSchema.parse(input),
   }
+  return tool
 }
 
 export function createEditTool(dependencies: FileToolDependencies): AgentTool {
-  return {
+  const tool: AgentTool = {
     description:
       'Performs an exact string replacement in a file. file_path must be an absolute path.',
     async execute(input, { parentMessageUuid, signal }) {
@@ -208,20 +196,60 @@ export function createEditTool(dependencies: FileToolDependencies): AgentTool {
       required: ['file_path', 'old_string', 'new_string'],
       type: 'object',
     },
-    getPermissionSubject: (input) => ({
-      isInWorkingDirectory:
-        typeof input.file_path === 'string' && isPathWithin(dependencies.cwd, input.file_path),
-      isReadOnly: false,
-      matchesSpecifier: (pattern) =>
-        typeof input.file_path === 'string' &&
-        matchesPathSpecifier(pattern, input.file_path, dependencies.cwd),
-      name: 'Edit',
-      requiresBypassConfirmation: false,
-    }),
-    getPermissionRule: (input) => filePermissionRule('Edit', input.file_path),
+    checkPermissions: (input, context) =>
+      checkFilePermission(tool, input, context, dependencies.cwd, false),
     isConcurrencySafe: () => false,
     name: 'Edit',
+    parseInput: (input) => editInputSchema.parse(input),
   }
+  return tool
+}
+
+function checkFilePermission(
+  tool: AgentTool,
+  input: JsonObject,
+  context: Parameters<NonNullable<AgentTool['checkPermissions']>>[1],
+  cwd: string,
+  readOnly: boolean,
+): ReturnType<NonNullable<AgentTool['checkPermissions']>> {
+  const filePath = typeof input.file_path === 'string' ? input.file_path : ''
+  const matchesSpecifier = (pattern: string) =>
+    Boolean(filePath) && matchesPathSpecifier(pattern, filePath, cwd)
+  const denyRule = findContentRule(context.rules, 'deny', tool.name, matchesSpecifier)
+  if (denyRule) {
+    return {
+      behavior: 'deny',
+      message: `Permission denied for ${tool.name}`,
+      rule: denyRule,
+      source: 'rule',
+    }
+  }
+  const askRule = findContentRule(context.rules, 'ask', tool.name, matchesSpecifier)
+  if (askRule) {
+    return {
+      behavior: 'ask',
+      message: `Permission required for ${tool.name}`,
+      rule: askRule,
+      source: 'rule',
+    }
+  }
+  if (context.autoAllowInternalToolUse?.(tool, input)) {
+    return { behavior: 'allow', source: 'internal', updatedInput: input }
+  }
+
+  const isInWorkingDirectory = Boolean(filePath) && isPathWithin(cwd, filePath)
+  if (context.mode !== 'dontAsk' && readOnly && isInWorkingDirectory) {
+    return { behavior: 'allow', source: 'mode', updatedInput: input }
+  }
+  if (context.mode === 'acceptEdits' && !readOnly && isInWorkingDirectory) {
+    return { behavior: 'allow', source: 'mode', updatedInput: input }
+  }
+
+  const allowRule = findContentRule(context.rules, 'allow', tool.name, matchesSpecifier)
+  if (allowRule) {
+    return { behavior: 'allow', rule: allowRule, source: 'rule', updatedInput: input }
+  }
+  return { behavior: 'passthrough', source: 'tool', updatedInput: input }
 }
 
 async function assertSafeToWriteExisting(filePath: string, state: FileReadState): Promise<void> {

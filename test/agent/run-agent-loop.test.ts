@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ContextManager } from '../../src/context/context-manager.js'
 import { createAssistantMessage } from '../../src/messages/create-message.js'
 import {
@@ -9,6 +9,7 @@ import {
 import { createUserMessage } from '../../src/messages/create-message.js'
 import { FakeModelAdapter } from '../../src/model/fake-model.js'
 import type { ModelStreamEvent } from '../../src/model/types.js'
+import type { AgentTool } from '../../src/tools/types.js'
 
 async function drain(
   generator: AsyncGenerator<AgentEvent, AgentLoopResult>,
@@ -288,6 +289,68 @@ describe('runAgentLoop', () => {
 
     expect(result.reason).toBe('model_error')
     expect(result.error).toContain('Invalid JSON input for tool Read')
+  })
+
+  it('returns invalid tool input before permissions or execution', async () => {
+    const model = new FakeModelAdapter([
+      [
+        { type: 'message_start', messageId: 'assistant-invalid-input' },
+        {
+          type: 'content_block_start',
+          index: 0,
+          block: { type: 'tool_use', id: 'tool-invalid', name: 'Write' },
+        },
+        {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'input_json_delta', partialJson: '{"file_path":42}' },
+        },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_delta', stopReason: 'tool_use', usage: {} },
+        { type: 'message_stop' },
+      ],
+      textResponse('understood'),
+    ])
+    const checkPermissions = vi.fn()
+    const execute = vi.fn(async () => ({ content: 'unexpected' }))
+    const canUseTool = vi.fn(async () => ({ behavior: 'allow' as const }))
+    const write: AgentTool = {
+      checkPermissions,
+      description: 'Write',
+      execute,
+      inputSchema: { type: 'object' },
+      isConcurrencySafe: () => false,
+      name: 'Write',
+      parseInput: () => {
+        throw new Error('file_path must be a string')
+      },
+    }
+
+    await drain(
+      runAgentLoop({
+        canUseTool,
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'write' }] })],
+        model,
+        modelId: 'test-model',
+        systemPrompt: [],
+        tools: [write],
+      }),
+    )
+
+    expect(checkPermissions).not.toHaveBeenCalled()
+    expect(canUseTool).not.toHaveBeenCalled()
+    expect(execute).not.toHaveBeenCalled()
+    expect(model.requests[1]?.messages.at(-1)).toMatchObject({
+      content: [
+        {
+          content: 'Invalid input for Write: file_path must be a string',
+          isError: true,
+          toolUseId: 'tool-invalid',
+          type: 'tool_result',
+        },
+      ],
+      role: 'user',
+    })
   })
 
   it('stops before tool execution when the tool-turn limit is exhausted', async () => {
