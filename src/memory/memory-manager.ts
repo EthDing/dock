@@ -140,6 +140,8 @@ Do not save code structure, file paths, Git history, information already in AGEN
     if (!this.enabled || !samePath(filePath, this.entrypoint)) return undefined
     const analysis = analyzeIndex(contentLoadedFromIndex(content))
     if (analysis.lineCount > MAX_INDEX_LINES || analysis.byteCount > MAX_INDEX_BYTES) {
+      // The file is already durable at this point. The error is feedback for
+      // the next model turn to repair the index, not a failed write to roll back.
       return {
         content: `The MEMORY.md write succeeded, but the index is over its read limit (${analysis.lineCount} lines, ${analysis.byteCount} bytes). Rewrite it to at most ${MAX_INDEX_LINES} lines and ${MAX_INDEX_BYTES} bytes; keep one concise line per topic.`,
         isError: true,

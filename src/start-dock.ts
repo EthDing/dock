@@ -266,6 +266,8 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     )
     const extractorFileDependencies = {
       cwd,
+      // Background extraction must not mutate the foreground checkpoint state
+      // or write file-history records concurrently with the session transcript.
       fileHistory: { trackEdit: async () => {} },
       readFileState: new FileReadState(),
       writeLifecycle: fileDependencies.writeLifecycle,

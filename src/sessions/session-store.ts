@@ -185,6 +185,9 @@ export class SessionWriter {
         this.#headUuid = message.uuid
         continue
       }
+      // Message identity belongs to the creation layer. Storage only links the
+      // supplied UUID onto the current head; generating one here would split the
+      // in-memory and persisted conversation identities.
       const record: SessionMessageRecord = {
         parentUuid: this.#headUuid,
         ...message,
@@ -500,6 +503,8 @@ function buildActiveConversation(records: readonly SessionRecord[]): {
 
   let activeChain = chain.reverse()
   if (compactBoundary) {
+    // A compact summary is a new logical root. Preserved messages remain in
+    // their original order, followed only by messages appended after its head.
     const baseUuids = [compactBoundary.summaryUuid, ...compactBoundary.preservedUuids]
     const base = baseUuids.map((uuid) => {
       const message = messagesByUuid.get(uuid)

@@ -13,6 +13,9 @@ pnpm install
 pnpm run ci
 ```
 
+Maintainers and coding agents should start with the focused design notes in
+[`docs/internals/`](docs/internals/README.md) before changing a core subsystem.
+
 ## First run
 
 Build and start Dock inside WSL:

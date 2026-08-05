@@ -45,6 +45,8 @@ export class ExtractMemories {
     if (!this.#memory.enabled) return
     const snapshot = [...messages]
     if (this.#running) {
+      // The newest snapshot contains every earlier unprocessed message, so one
+      // trailing run is enough even when several turns finish during extraction.
       this.#pendingMessages = snapshot
       return
     }
@@ -106,6 +108,9 @@ export class ExtractMemories {
       ],
     })
     const baseMessages = [...messages, extractionPrompt]
+    // Keep the parent's model-visible prompt, history prefix, and tool schemas.
+    // Enforcement changes through canUseTool so provider prompt caches can reuse
+    // the shared prefix instead of seeing a different tool surface.
     const generator = runAgentLoop({
       canUseTool: createMemoryCanUseTool(this.#memory),
       ...(this.#maxOutputTokens ? { maxOutputTokens: this.#maxOutputTokens } : {}),

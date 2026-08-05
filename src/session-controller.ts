@@ -166,6 +166,8 @@ export class SessionController {
     if (this.#closed) return
     this.abort('shutdown')
     this.#closed = true
+    // The transcript lock cannot be released while turn-complete work may still
+    // use controller-owned resources or emit its final notification.
     await this.#turnComplete?.drain()
     await this.#writer.close()
   }

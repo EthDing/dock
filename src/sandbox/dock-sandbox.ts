@@ -121,6 +121,9 @@ export class DockSandbox {
 
   async wrapCommand(command: string, signal: AbortSignal, commandId: string): Promise<string> {
     if (!this.#enabled) return command
+    // Tool permissions decide whether Bash may run; sandbox-runtime separately
+    // constrains the process after that decision. Neither layer substitutes for
+    // explicit deny rules or the other's enforcement boundary.
     return this.#manager.wrapWithSandbox(command, '/bin/bash', undefined, signal, {
       commandId,
       commandText: command,
