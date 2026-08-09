@@ -1,25 +1,24 @@
 import type { UUID } from 'node:crypto'
-import type { ContextManager } from '../context/context-manager.js'
+import { buildPostCompactMessages } from '../context/compaction.js'
+import type { ContextManager, PreparedCompaction } from '../context/context-manager.js'
+import {
+  type AssistantTranscriptMessage,
+  createAssistantMessage,
+  createUserMessage,
+  type TranscriptMessage,
+  type UserTranscriptMessage,
+} from '../messages/create-message.js'
+import { streamAssistantResponse } from '../model/stream-response.js'
 import type {
   AssistantMessage,
   JsonObject,
   ModelAdapter,
-  ModelMessage,
-  ModelRequest,
   ModelStreamEvent,
-  StopReason,
   ToolResultBlock,
   ToolUseBlock,
-  Usage,
 } from '../model/types.js'
-import {
-  createAssistantMessage,
-  createUserMessage,
-  type AssistantTranscriptMessage,
-  type TranscriptMessage,
-  type UserTranscriptMessage,
-} from '../messages/create-message.js'
 import type { AgentTool, AgentToolResult, CanUseTool } from '../tools/types.js'
+import { buildModelRequest, roughRequestTokens } from './request.js'
 
 export type AgentLoopOptions = {
   canUseTool?: CanUseTool
@@ -36,7 +35,13 @@ export type AgentLoopOptions = {
 }
 
 export type AgentEvent =
-  | { type: 'compact'; messages: readonly TranscriptMessage[] }
+  | {
+      type: 'tool_results_cleared'
+      messages: readonly TranscriptMessage[]
+      toolUseIds: readonly string[]
+    }
+  | { type: 'compaction_status'; status: 'started' | 'failed' | 'cancelled'; message?: string }
+  | { type: 'compact'; messages: readonly TranscriptMessage[]; compaction?: PreparedCompaction }
   | { type: 'model_stream'; event: ModelStreamEvent }
   | { type: 'assistant_message'; message: AssistantTranscriptMessage }
   | { type: 'user_message'; message: UserTranscriptMessage }
@@ -49,11 +54,6 @@ export type AgentLoopResult = {
   error?: string
 }
 
-type PendingBlock =
-  | { type: 'text'; text: string }
-  | { type: 'thinking'; thinking: string; signature: string }
-  | { type: 'tool_use'; id: string; name: string; partialJson: string }
-
 export async function* runAgentLoop(
   options: AgentLoopOptions,
 ): AsyncGenerator<AgentEvent, AgentLoopResult> {
@@ -65,6 +65,7 @@ export async function* runAgentLoop(
 
   const messages: TranscriptMessage[] = [...options.messages]
   let toolTurns = 0
+  let userContext = options.userContext
 
   try {
     while (!controller.signal.aborted) {
@@ -73,132 +74,81 @@ export async function* runAgentLoop(
         inputSchema,
         name,
       }))
-      if (options.contextManager) {
-        const prepared = await options.contextManager.prepare(messages, {
-          systemPrompt: options.systemPrompt,
-          tools: toolDefinitions,
-        })
-        if (prepared.messages !== messages) {
-          messages.splice(0, messages.length, ...prepared.messages)
-        }
-        if (prepared.compacted) yield { messages: [...messages], type: 'compact' }
-      }
-      const request: ModelRequest = {
-        ...(options.maxOutputTokens ? { maxOutputTokens: options.maxOutputTokens } : {}),
-        messages: [
-          ...buildUserContextMessages(options.userContext),
-          ...messages.map((message) => message.message),
-        ],
+      const context = {
         modelId: options.modelId,
         systemPrompt: options.systemPrompt,
         tools: toolDefinitions,
+        ...(options.maxOutputTokens ? { maxOutputTokens: options.maxOutputTokens } : {}),
+        ...(userContext ? { userContext } : {}),
       }
-
-      const blocks = new Map<number, PendingBlock>()
-      let messageId: string | undefined
-      let stopReason: StopReason | undefined
-      let usage: Usage = {}
-
-      try {
-        for await (const event of options.model.stream(request, { signal: controller.signal })) {
-          yield { type: 'model_stream', event }
-
-          switch (event.type) {
-            case 'message_start':
-              messageId = event.messageId
-              usage = { ...usage, ...event.usage }
-              break
-            case 'content_block_start':
-              if (event.block.type === 'text') {
-                blocks.set(event.index, { type: 'text', text: '' })
-              } else if (event.block.type === 'thinking') {
-                blocks.set(event.index, { type: 'thinking', thinking: '', signature: '' })
-              } else {
-                blocks.set(event.index, {
-                  type: 'tool_use',
-                  id: event.block.id,
-                  name: event.block.name,
-                  partialJson: '',
-                })
-              }
-              break
-            case 'content_block_delta': {
-              const block = blocks.get(event.index)
-              if (!block) throw new Error(`Delta for unknown content block ${event.index}`)
-              if (block.type === 'text' && event.delta.type === 'text_delta') {
-                block.text += event.delta.text
-              } else if (block.type === 'thinking' && event.delta.type === 'thinking_delta') {
-                block.thinking += event.delta.thinking
-              } else if (block.type === 'thinking' && event.delta.type === 'signature_delta') {
-                block.signature += event.delta.signature
-              } else if (block.type === 'tool_use' && event.delta.type === 'input_json_delta') {
-                block.partialJson += event.delta.partialJson
-              } else {
-                throw new Error(`Invalid delta ${event.delta.type} for ${block.type} block`)
-              }
-              break
+      if (options.contextManager) {
+        const cleared = options.contextManager.clear(messages)
+        if (cleared.clearedToolUseIds.length) {
+          yield {
+            type: 'tool_results_cleared',
+            messages: cleared.messages,
+            toolUseIds: cleared.clearedToolUseIds,
+          }
+          messages.splice(0, messages.length, ...cleared.messages)
+        }
+        if (options.contextManager.shouldAutoCompact(messages, context)) {
+          yield { type: 'compaction_status', status: 'started' }
+          let prepared: PreparedCompaction | undefined
+          try {
+            prepared = await options.contextManager.compact(
+              messages,
+              buildModelRequest(messages, context),
+              controller.signal,
+              'auto',
+            )
+          } catch (error) {
+            yield {
+              type: 'compaction_status',
+              status: controller.signal.aborted ? 'cancelled' : 'failed',
+              message: error instanceof Error ? error.message : String(error),
             }
-            case 'content_block_stop':
-              if (!blocks.has(event.index)) {
-                throw new Error(`Stop for unknown content block ${event.index}`)
-              }
-              break
-            case 'message_delta':
-              stopReason = event.stopReason
-              usage = { ...usage, ...event.usage }
-              break
-            case 'message_stop':
-              break
+            if (controller.signal.aborted) return { messages, reason: 'aborted' }
+          }
+          if (prepared) {
+            const compacted = buildPostCompactMessages(prepared)
+            // The consumer durably commits the boundary before resuming this generator.
+            yield { type: 'compact', messages: compacted, compaction: prepared }
+            prepared.commit()
+            messages.splice(0, messages.length, ...compacted)
+            if (prepared.userContext !== undefined) userContext = prepared.userContext
           }
         }
-      } catch (error) {
-        if (controller.signal.aborted) {
-          return { messages, reason: 'aborted' }
-        }
-        return {
-          error: error instanceof Error ? error.message : String(error),
-          messages,
-          reason: 'model_error',
-        }
       }
-
-      if (!messageId || !stopReason) {
-        return {
-          error: 'Model stream ended without message metadata',
-          messages,
-          reason: 'model_error',
-        }
-      }
-
-      let content: AssistantMessage['content']
+      if (controller.signal.aborted) return { messages, reason: 'aborted' }
+      const request = buildModelRequest(messages, {
+        ...context,
+        ...(userContext ? { userContext } : {}),
+      })
+      let assistantApiMessage: AssistantMessage
+      const stream = streamAssistantResponse(options.model, request, controller.signal)
       try {
-        content = [...blocks.entries()]
-          .sort(([left], [right]) => left - right)
-          .map(([, block]) => {
-            if (block.type !== 'tool_use') return block
-            return {
-              type: 'tool_use' as const,
-              id: block.id,
-              name: block.name,
-              input: parseToolInput(block.name, block.partialJson),
-            }
-          })
-      } catch (error) {
-        return {
-          error: error instanceof Error ? error.message : String(error),
-          messages,
-          reason: 'model_error',
+        let next = await stream.next()
+        while (!next.done) {
+          yield { type: 'model_stream', event: next.value }
+          next = await stream.next()
         }
+        assistantApiMessage = next.value
+      } catch (error) {
+        return controller.signal.aborted
+          ? { messages, reason: 'aborted' }
+          : {
+              messages,
+              reason: 'model_error',
+              error: error instanceof Error ? error.message : String(error),
+            }
+      } finally {
+        await stream.return(undefined as never)
       }
-
-      const assistantApiMessage: AssistantMessage = {
-        content,
-        id: messageId,
-        role: 'assistant',
-        stopReason,
-        usage,
+      const content = assistantApiMessage.content
+      const assistantMessage = {
+        ...createAssistantMessage(assistantApiMessage),
+        requestTokenEstimate: roughRequestTokens(request),
       }
-      const assistantMessage = createAssistantMessage(assistantApiMessage)
       messages.push(assistantMessage)
       yield { type: 'assistant_message', message: assistantMessage }
 
@@ -271,43 +221,6 @@ function abortedToolResult(toolUse: ToolUseBlock): ToolResultBlock {
     toolUseId: toolUse.id,
     type: 'tool_result',
   }
-}
-
-function isJsonObject(value: unknown): value is JsonObject {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function buildUserContextMessages(
-  context: Readonly<Record<string, string>> | undefined,
-): ModelMessage[] {
-  if (!context || Object.keys(context).length === 0) return []
-  const content = Object.entries(context)
-    .map(([key, value]) => `# ${key}\n${value}`)
-    .join('\n')
-  return [
-    {
-      content: [
-        {
-          text: `<system-reminder>\nAs you answer the user's questions, you can use the following context:\n${content}\n\nIMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>`,
-          type: 'text',
-        },
-      ],
-      role: 'user',
-    },
-  ]
-}
-
-function parseToolInput(toolName: string, partialJson: string): JsonObject {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(partialJson || '{}') as unknown
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    throw new Error(`Invalid JSON input for tool ${toolName}: ${detail}`)
-  }
-
-  if (!isJsonObject(parsed)) throw new Error(`Tool ${toolName} input must be an object`)
-  return parsed
 }
 
 type ToolBatch = {

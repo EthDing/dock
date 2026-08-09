@@ -241,3 +241,42 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   }
   throw new Error('Timed out waiting for predicate')
 }
+
+it('freezes each scheduled context snapshot while extraction is running', async () => {
+  const memory = await createMemory()
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const requests: ModelRequest[] = []
+  const model: ModelAdapter = {
+    async *stream(request) {
+      requests.push(request)
+      if (requests.length === 1) await gate
+      yield* finalResponse(String(requests.length))
+    },
+  }
+  const extractor = new ExtractMemories({
+    memory,
+    model,
+    modelId: 'test',
+    tools: [],
+    systemPrompt: ['fixed'],
+  })
+  const first = createUserMessage({ content: [{ type: 'text', text: 'first' }] })
+  extractor.schedule([first], { AGENTS: 'old' })
+  const deadline = Date.now() + 2000
+  while (!requests.length) {
+    if (Date.now() > deadline) throw new Error('Extraction did not start')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  const second = createUserMessage({ content: [{ type: 'text', text: 'second' }] })
+  const newContext = { AGENTS: 'new' }
+  extractor.schedule([first, second], newContext)
+  newContext.AGENTS = 'mutated later'
+  release()
+  await extractor.drain()
+  expect(JSON.stringify(requests[0]?.messages[0])).toContain('old')
+  expect(JSON.stringify(requests[1]?.messages[0])).toContain('new')
+  expect(JSON.stringify(requests[1]?.messages[0])).not.toContain('mutated later')
+})

@@ -1,7 +1,9 @@
 import { createHash, type UUID } from 'node:crypto'
-import { mkdir, open, readFile, unlink, type FileHandle } from 'node:fs/promises'
+import { type FileHandle, mkdir, open, readFile, unlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import type { FileHistorySnapshot } from '../checkpoint/file-history.js'
+import type { CompactionResult } from '../context/compaction.js'
+import { applyClearedToolResults } from '../context/tool-result-clearing.js'
 import type { TranscriptMessage } from '../messages/create-message.js'
 import { asSessionId, isUuid, type SessionId } from './ids.js'
 
@@ -16,6 +18,7 @@ export type SessionMetadataRecord = {
 }
 
 export type SessionMessageRecord = TranscriptMessage & {
+  compactionId?: UUID
   parentUuid: UUID | null
   sessionId: SessionId
   cwd: string
@@ -47,7 +50,15 @@ export type FileHistorySnapshotRecord = {
   }
 }
 
+export type SessionToolResultClearRecord = {
+  type: 'tool_result_clear'
+  toolUseIds: string[]
+  timestamp: string
+}
+
 export type SessionCompactRecord = {
+  compactionId?: UUID
+  metadata?: Pick<CompactionResult, 'usage' | 'trigger' | 'preTokens' | 'postTokens'>
   type: 'compact_boundary'
   preservedUuids: UUID[]
   summaryUuid: UUID
@@ -61,6 +72,7 @@ export type SessionRecord =
   | SessionRewindRecord
   | FileHistorySnapshotRecord
   | SessionCompactRecord
+  | SessionToolResultClearRecord
 
 export type LoadedSession = {
   fileHistorySnapshots: readonly FileHistorySnapshot[]
@@ -85,6 +97,9 @@ type WriterOptions = SessionLocation & {
 }
 
 export class SessionWriter {
+  get path(): string {
+    return this.#lockPath.slice(0, -'.lock'.length)
+  }
   readonly #file: FileHandle
   readonly #lock: FileHandle
   readonly #lockPath: string
@@ -161,13 +176,24 @@ export class SessionWriter {
     try {
       const loaded = await loadSession(options)
       file = await open(sessionPath, 'a', 0o600)
+      const existingBytes = await readFile(sessionPath)
+      if (loaded.truncatedTail) {
+        // Remove only the incomplete final record before appending new JSONL.
+        await file.truncate(existingBytes.lastIndexOf(10) + 1)
+        await file.sync()
+      } else if (existingBytes.length && existingBytes.at(-1) !== 10) {
+        await file.write('\n')
+        await file.sync()
+      }
       return new SessionWriter({
         cwd: loaded.metadata.cwd,
         file,
         headUuid: loaded.headUuid,
         lock,
         lockPath,
-        messageUuids: new Set(loaded.messages.map((message) => message.uuid)),
+        messageUuids: new Set(
+          committedMessageRecords(loaded.records).map((message) => message.uuid),
+        ),
         now: options.now ?? (() => new Date()),
         sessionId: options.sessionId,
       })
@@ -247,29 +273,59 @@ export class SessionWriter {
     })
   }
 
-  async recordCompaction(messages: readonly TranscriptMessage[]): Promise<void> {
+  async recordToolResultClearing(toolUseIds: readonly string[]): Promise<void> {
+    this.#assertOpen()
+    if (!toolUseIds.length) return
+    await appendAndSync(this.#file, {
+      type: 'tool_result_clear',
+      toolUseIds: [...new Set(toolUseIds)],
+      timestamp: this.#now().toISOString(),
+    })
+  }
+
+  async recordCompaction(
+    messages: readonly TranscriptMessage[],
+    metadata?: CompactionResult,
+  ): Promise<void> {
     this.#assertOpen()
     const [summary, ...preserved] = messages
-    if (summary?.type !== 'user' || !summary.isCompactSummary) {
+    if (summary?.type !== 'user' || !summary.isCompactSummary)
       throw new Error('Compaction must begin with a compact summary message')
+    const compactionId = summary.uuid
+    let parentUuid: UUID | null = null
+    // Staged messages cannot become the conversation head until the boundary is
+    // synced. A crash between these writes leaves the previous conversation intact.
+    for (const message of messages) {
+      if (!this.#messageUuids.has(message.uuid)) {
+        await appendAndSync(this.#file, {
+          ...message,
+          parentUuid,
+          compactionId,
+          cwd: this.#cwd,
+          sessionId: this.#sessionId,
+        })
+      }
+      parentUuid = message.uuid
     }
-    if (!this.#messageUuids.has(summary.uuid)) {
-      await appendAndSync(this.#file, {
-        parentUuid: null,
-        ...summary,
-        cwd: this.#cwd,
-        sessionId: this.#sessionId,
-      })
-      this.#messageUuids.add(summary.uuid)
-    }
-    const preservedUuids = preserved.map((message) => message.uuid)
     await appendAndSync(this.#file, {
-      preservedUuids,
-      summaryUuid: summary.uuid,
-      timestamp: this.#now().toISOString(),
       type: 'compact_boundary',
+      compactionId,
+      summaryUuid: summary.uuid,
+      preservedUuids: preserved.map((message) => message.uuid),
+      timestamp: this.#now().toISOString(),
+      ...(metadata
+        ? {
+            metadata: {
+              usage: metadata.usage,
+              trigger: metadata.trigger,
+              ...(metadata.preTokens !== undefined ? { preTokens: metadata.preTokens } : {}),
+              ...(metadata.postTokens !== undefined ? { postTokens: metadata.postTokens } : {}),
+            },
+          }
+        : {}),
     })
-    this.#headUuid = preservedUuids.at(-1) ?? summary.uuid
+    for (const message of messages) this.#messageUuids.add(message.uuid)
+    this.#headUuid = parentUuid
   }
 
   async close(): Promise<void> {
@@ -451,6 +507,15 @@ function parseSessionRecord(value: unknown, path: string, line: number): Session
     }
     return value as FileHistorySnapshotRecord
   }
+  if (value.type === 'tool_result_clear') {
+    if (
+      !Array.isArray(value.toolUseIds) ||
+      !value.toolUseIds.every((id) => typeof id === 'string') ||
+      typeof value.timestamp !== 'string'
+    )
+      throw new Error(`Invalid tool_result_clear record at ${path}:${line}`)
+    return value as SessionToolResultClearRecord
+  }
   if (value.type === 'compact_boundary') {
     if (
       typeof value.summaryUuid !== 'string' ||
@@ -470,57 +535,81 @@ function isSessionMessageRecord(record: SessionRecord): record is SessionMessage
   return record.type === 'user' || record.type === 'assistant'
 }
 
+function committedMessageRecords(records: readonly SessionRecord[]): SessionMessageRecord[] {
+  const commits = new Set(
+    records.flatMap((record) =>
+      record.type === 'compact_boundary' && record.compactionId ? [record.compactionId] : [],
+    ),
+  )
+  return records.filter(
+    (record): record is SessionMessageRecord =>
+      isSessionMessageRecord(record) && (!record.compactionId || commits.has(record.compactionId)),
+  )
+}
+
 function buildActiveConversation(records: readonly SessionRecord[]): {
   headUuid: UUID | null
-  messages: TranscriptMessage[]
+  messages: readonly TranscriptMessage[]
 } {
-  const messagesByUuid = new Map<UUID, SessionMessageRecord>()
+  const committed = committedMessageRecords(records)
+  const byUuid = new Map(committed.map((message) => [message.uuid, message]))
+  const boundaries: SessionCompactRecord[] = []
+  const cleared = new Set<string>()
   let headUuid: UUID | null = null
-  let compactBoundary: SessionCompactRecord | undefined
   for (const record of records) {
     if (isSessionMessageRecord(record)) {
-      messagesByUuid.set(record.uuid, record)
-      headUuid = record.uuid
-    } else if (record.type === 'rewind') {
-      headUuid = record.targetUuid
-    } else if (record.type === 'compact_boundary') {
-      compactBoundary = record
-      headUuid = record.preservedUuids.at(-1) ?? record.summaryUuid
+      if (!record.compactionId) headUuid = record.uuid
+    } else if (record.type === 'rewind') headUuid = record.targetUuid
+    else if (record.type === 'compact_boundary') {
+      const ids = [record.summaryUuid, ...record.preservedUuids]
+      if (!ids.every((id) => byUuid.has(id))) throw new Error('Missing compacted message')
+      boundaries.push(record)
+      headUuid = ids.at(-1) ?? null
+    } else if (record.type === 'tool_result_clear') {
+      for (const id of record.toolUseIds) cleared.add(id)
     }
   }
-
   const chain: SessionMessageRecord[] = []
   const visited = new Set<UUID>()
   let current = headUuid
   while (current) {
     if (visited.has(current)) throw new Error(`Cycle detected in parentUuid chain at ${current}`)
     visited.add(current)
-    const message = messagesByUuid.get(current)
+    const message = byUuid.get(current)
     if (!message) throw new Error(`Missing message ${current} in parentUuid chain`)
     chain.push(message)
     current = message.parentUuid
   }
-
-  let activeChain = chain.reverse()
-  if (compactBoundary) {
-    // A compact summary is a new logical root. Preserved messages remain in
-    // their original order, followed only by messages appended after its head.
-    const baseUuids = [compactBoundary.summaryUuid, ...compactBoundary.preservedUuids]
-    const base = baseUuids.map((uuid) => {
-      const message = messagesByUuid.get(uuid)
-      if (!message) throw new Error(`Missing compacted message ${uuid}`)
+  let active = chain.reverse()
+  // A boundary applies only to its own branch. Rewinding before it must not
+  // resurrect the latest summary or discard the selected older branch.
+  for (const boundary of boundaries.reverse()) {
+    const ids = [boundary.summaryUuid, ...boundary.preservedUuids]
+    const baseHead = ids.at(-1)
+    const index = active.findIndex((message) => message.uuid === baseHead)
+    const inBase = headUuid ? ids.indexOf(headUuid) : -1
+    if (index < 0 && inBase < 0) continue
+    const base = (inBase >= 0 ? ids.slice(0, inBase + 1) : ids).map((id) => {
+      const message = byUuid.get(id)
+      if (!message) throw new Error(`Missing compacted message ${id}`)
       return message
     })
-    const baseHead = baseUuids.at(-1)
-    const baseHeadIndex = activeChain.findIndex((message) => message.uuid === baseHead)
-    const suffix = baseHeadIndex >= 0 ? activeChain.slice(baseHeadIndex + 1) : []
-    activeChain = [...base, ...suffix]
+    active = [...base, ...(index >= 0 ? active.slice(index + 1) : [])]
+    break
   }
-
   return {
     headUuid,
-    messages: activeChain.map(
-      ({ parentUuid: _parentUuid, sessionId: _sessionId, cwd: _cwd, ...message }) => message,
+    messages: applyClearedToolResults(
+      active.map(
+        ({
+          parentUuid: _parent,
+          cwd: _cwd,
+          sessionId: _session,
+          compactionId: _compact,
+          ...message
+        }) => message,
+      ),
+      cleared,
     ),
   }
 }

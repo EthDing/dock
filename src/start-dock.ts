@@ -1,10 +1,7 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { ProcessTerminal, TuiMainScreen, type Terminal } from '@dock/tui'
-import { runAgentLoop } from './agent/run-agent-loop.js'
+import { ProcessTerminal, type Terminal, TuiMainScreen } from '@dock/tui'
 import { FileHistory } from './checkpoint/file-history.js'
-import { ContextManager } from './context/context-manager.js'
-import { loadInstructionDocuments } from './context/load-instructions.js'
 import {
   loadProviderCredential,
   promptForProviderCredential,
@@ -19,36 +16,40 @@ import {
 import { findProjectRoot, loadSettings, type ProviderSettings } from './config/load-settings.js'
 import { ensureWorkspaceTrust } from './config/workspace-trust.js'
 import { addLocalPermissionRule, updateLocalSandboxMode } from './config/write-settings.js'
-import { createUserMessage } from './messages/create-message.js'
+import { compactConversation } from './context/compaction.js'
+import { ContextManager } from './context/context-manager.js'
+import { loadInstructionDocuments } from './context/load-instructions.js'
+import { prepareFileRestoration } from './context/restore-context.js'
 import { ExtractMemories } from './memory/extract-memories.js'
 import { MemoryManager } from './memory/memory-manager.js'
 import { MemoryNotificationBroker } from './memory/memory-notification-broker.js'
 import { createModelAdapter, getApiKeyEnvironmentName } from './model/create-model-adapter.js'
 import type { ModelAdapter } from './model/types.js'
 import { createCanUseTool } from './permissions/can-use-tool.js'
-import { PermissionBroker } from './permissions/permission-broker.js'
 import {
   filterDeniedTools,
   type PermissionMode,
   type PermissionRules,
+  resolvePermission,
 } from './permissions/evaluate-permission.js'
+import { PermissionBroker } from './permissions/permission-broker.js'
 import { PermissionModeState } from './permissions/permission-mode-state.js'
 import { SessionPermissionState } from './permissions/session-permission-state.js'
-import { SessionController } from './session-controller.js'
 import {
   createSandboxRuntimeConfig,
   DockSandbox,
   type SandboxManagerApi,
 } from './sandbox/dock-sandbox.js'
 import { SandboxNetworkPermissionBroker } from './sandbox/network-permission-broker.js'
-import { createSessionId, asSessionId, type SessionId } from './sessions/ids.js'
+import { SessionController } from './session-controller.js'
+import { asSessionId, createSessionId, type SessionId } from './sessions/ids.js'
 import { findMostRecentSession, forkSession, listSessions } from './sessions/session-manager.js'
 import { loadSession, SessionWriter } from './sessions/session-store.js'
 import { createBashTool } from './tools/bash-tool.js'
 import { FileReadState } from './tools/file-read-state.js'
 import { createEditTool, createReadTool, createWriteTool } from './tools/file-tools.js'
 import { createGlobTool, createGrepTool } from './tools/search-tools.js'
-import { DockTuiApp, type DockSessionCommands } from './ui/dock-tui-app.js'
+import { type DockSessionCommands, DockTuiApp } from './ui/dock-tui-app.js'
 import { RuntimeController } from './ui/runtime-controller.js'
 
 export type StartDockOptions = {
@@ -190,14 +191,25 @@ export async function startDock(options: StartDockOptions): Promise<void> {
   }
 
   sessionId ??= createSessionId()
-  const instructionDocuments = await loadInstructionDocuments({
-    cwd,
-    homeDir,
-    projectRoot: loadedSettings.projectRoot,
-  })
-  const instructionContext = instructionDocuments
-    .map((document) => `Contents of ${document.path}:\n\n${document.content}`)
-    .join('\n\n')
+  const loadUserContext = async (): Promise<Record<string, string>> => {
+    const instructionDocuments = await loadInstructionDocuments({
+      cwd,
+      homeDir,
+      projectRoot: loadedSettings.projectRoot,
+    })
+    const instructionContext = instructionDocuments
+      .map((document) => `Contents of ${document.path}:\n\n${document.content}`)
+      .join('\n\n')
+    const memoryIndex = await memory.loadIndex()
+    return {
+      ...(instructionContext ? { AGENTS: instructionContext } : {}),
+      ...(memoryIndex
+        ? {
+            AUTO_MEMORY: `Contents of ${memory.entrypoint} (auto memory index, persisted across conversations):\n\n${memoryIndex.content}`,
+          }
+        : {}),
+    }
+  }
   const permissionBroker = new PermissionBroker()
   const permissionMode =
     cli.permissionMode ?? loadedSettings.settings.permissions?.defaultMode ?? 'default'
@@ -228,16 +240,8 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       sessionId: targetSessionId,
       snapshots: existing?.fileHistorySnapshots ?? [],
     })
-    const memoryIndex = await memory.loadIndex()
+    const userContext = await loadUserContext()
     const memoryPrompt = memory.buildSystemPrompt()
-    const userContext = {
-      ...(instructionContext ? { AGENTS: instructionContext } : {}),
-      ...(memoryIndex
-        ? {
-            AUTO_MEMORY: `Contents of ${memory.entrypoint} (auto memory index, persisted across conversations):\n\n${memoryIndex.content}`,
-          }
-        : {}),
-    }
     const readFileState = new FileReadState()
     const fileDependencies = {
       cwd,
@@ -313,8 +317,31 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     const contextManager = new ContextManager({
       contextWindow: provider.contextWindow ?? 200_000,
       maxOutputTokens: provider.maxOutputTokens ?? 8_192,
-      summarize: ({ instructions, transcript }) =>
-        summarizeWithModel(model, modelId, transcript, instructions),
+      toolResultClearing: loadedSettings.settings.contextManagement?.toolResultClearing,
+      summarize: (input) => compactConversation({ ...input, model, transcriptPath: writer.path }),
+      prepareRestoration: async (signal) => {
+        const nextUserContext = await loadUserContext()
+        const restored = await prepareFileRestoration({
+          readFileState,
+          signal,
+          canRead: async (path) => {
+            const readTool = tools.find((tool) => tool.name === 'Read')
+            if (!readTool) return false
+            const decision = await resolvePermission(
+              readTool,
+              { file_path: path },
+              {
+                rules: permissionRules,
+                mode: permissionModeState.value,
+                autoAllowInternalToolUse: (_tool, input) =>
+                  typeof input.file_path === 'string' && memory.isMemoryPath(input.file_path),
+              },
+            )
+            return decision.behavior === 'allow'
+          },
+        })
+        return { ...restored, userContext: nextUserContext }
+      },
     })
     const systemPrompt = [
       'You are Dock, an interactive coding agent. Read the project, use tools to act, and verify your work.',
@@ -517,41 +544,6 @@ async function tryLoadSession(options: {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined
     throw error
   }
-}
-
-async function summarizeWithModel(
-  model: ModelAdapter,
-  modelId: string,
-  transcript: string,
-  instructions?: string,
-): Promise<string> {
-  const generator = runAgentLoop({
-    messages: [
-      createUserMessage({
-        content: [
-          {
-            text: `${instructions ? `${instructions}\n\n` : ''}Summarize this conversation for continuation:\n\n${transcript}`,
-            type: 'text',
-          },
-        ],
-      }),
-    ],
-    model,
-    modelId,
-    systemPrompt: ['Produce a concise but complete continuation summary.'],
-    tools: [],
-  })
-  let next = await generator.next()
-  while (!next.done) next = await generator.next()
-  const assistant = [...next.value.messages]
-    .reverse()
-    .find((message) => message.type === 'assistant')
-  return (
-    assistant?.message.content
-      .filter((block) => block.type === 'text')
-      .map((block) => block.text)
-      .join('\n') ?? ''
-  )
 }
 
 function isPermissionMode(value: string): value is PermissionMode {

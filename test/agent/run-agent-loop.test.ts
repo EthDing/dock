@@ -1,12 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ContextManager } from '../../src/context/context-manager.js'
-import { createAssistantMessage } from '../../src/messages/create-message.js'
 import {
-  runAgentLoop,
   type AgentEvent,
   type AgentLoopResult,
+  runAgentLoop,
 } from '../../src/agent/run-agent-loop.js'
-import { createUserMessage } from '../../src/messages/create-message.js'
+import { ContextManager } from '../../src/context/context-manager.js'
+import { createAssistantMessage, createUserMessage } from '../../src/messages/create-message.js'
 import { FakeModelAdapter } from '../../src/model/fake-model.js'
 import type { ModelStreamEvent } from '../../src/model/types.js'
 import type { AgentTool } from '../../src/tools/types.js'
@@ -482,8 +481,17 @@ describe('runAgentLoop', () => {
     const contextManager = new ContextManager({
       contextWindow: 100_000,
       maxOutputTokens: 8_000,
-      preserveRecentMessages: 1,
-      summarize: async () => 'compact summary',
+      summarize: async () => ({
+        summaryMessages: [
+          createUserMessage(
+            { content: [{ type: 'text', text: 'compact summary' }] },
+            { isCompactSummary: true },
+          ),
+        ],
+        attachments: [],
+        usage: {},
+        trigger: 'auto',
+      }),
     })
 
     await drain(
@@ -492,7 +500,7 @@ describe('runAgentLoop', () => {
         messages: [
           createUserMessage({ content: [{ type: 'text', text: 'old' }] }),
           createAssistantMessage({
-            content: [{ type: 'text', text: 'large' }],
+            content: [{ type: 'text', text: 'large'.repeat(70_000) }],
             id: 'provider-large',
             role: 'assistant',
             stopReason: 'end_turn',
@@ -538,4 +546,21 @@ describe('runAgentLoop', () => {
     })
     expect(result.messages).toHaveLength(2)
   })
+})
+
+it('closes the provider stream when the loop consumer stops early', async () => {
+  let closed = false
+  const model = {
+    async *stream() {
+      try {
+        yield { type: 'message_start' as const, messageId: 'partial' }
+      } finally {
+        closed = true
+      }
+    },
+  }
+  const loop = runAgentLoop({ model, modelId: 'test', messages: [], systemPrompt: [], tools: [] })
+  await loop.next()
+  await loop.return({ reason: 'aborted', messages: [] })
+  expect(closed).toBe(true)
 })

@@ -2,6 +2,7 @@ import { randomUUID, type UUID } from 'node:crypto'
 import type { AssistantMessage, UserMessage } from '../model/types.js'
 
 export type UserTranscriptMessage = {
+  isMeta?: true
   isCompactSummary?: true
   type: 'user'
   uuid: UUID
@@ -10,6 +11,7 @@ export type UserTranscriptMessage = {
 }
 
 export type AssistantTranscriptMessage = {
+  requestTokenEstimate?: number
   type: 'assistant'
   uuid: UUID
   timestamp: string
@@ -19,6 +21,7 @@ export type AssistantTranscriptMessage = {
 export type TranscriptMessage = UserTranscriptMessage | AssistantTranscriptMessage
 
 type IdentityOptions = {
+  isMeta?: true
   isCompactSummary?: true
   now?: () => Date
   uuid?: UUID
@@ -29,6 +32,7 @@ export function createUserMessage(
   options: IdentityOptions = {},
 ): UserTranscriptMessage {
   return {
+    ...(options.isMeta ? { isMeta: true as const } : {}),
     ...(options.isCompactSummary ? { isCompactSummary: true as const } : {}),
     message: { ...input, role: 'user' },
     timestamp: (options.now ?? (() => new Date()))().toISOString(),

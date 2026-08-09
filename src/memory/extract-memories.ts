@@ -17,6 +17,11 @@ type ExtractMemoriesOptions = {
   userContext?: Readonly<Record<string, string>>
 }
 
+type ExtractionSnapshot = {
+  messages: readonly TranscriptMessage[]
+  userContext?: Readonly<Record<string, string>>
+}
+
 export class ExtractMemories {
   readonly #memory: MemoryManager
   readonly #model: ModelAdapter
@@ -27,7 +32,7 @@ export class ExtractMemories {
   readonly #tools: readonly AgentTool[]
   readonly #userContext: Readonly<Record<string, string>> | undefined
   #lastMemoryMessageUuid: string | undefined
-  #pendingMessages: readonly TranscriptMessage[] | undefined
+  #pendingMessages: ExtractionSnapshot | undefined
   #running: Promise<void> | undefined
 
   constructor(options: ExtractMemoriesOptions) {
@@ -41,9 +46,15 @@ export class ExtractMemories {
     this.#userContext = options.userContext
   }
 
-  schedule(messages: readonly TranscriptMessage[]): void {
+  schedule(
+    messages: readonly TranscriptMessage[],
+    userContext: Readonly<Record<string, string>> | undefined = this.#userContext,
+  ): void {
     if (!this.#memory.enabled) return
-    const snapshot = [...messages]
+    const snapshot: ExtractionSnapshot = {
+      messages: [...messages],
+      ...(userContext ? { userContext: { ...userContext } } : {}),
+    }
     if (this.#running) {
       // The newest snapshot contains every earlier unprocessed message, so one
       // trailing run is enough even when several turns finish during extraction.
@@ -72,11 +83,11 @@ export class ExtractMemories {
     }
   }
 
-  async #runChain(initialMessages: readonly TranscriptMessage[]): Promise<void> {
-    let messages: readonly TranscriptMessage[] | undefined = initialMessages
+  async #runChain(initialMessages: ExtractionSnapshot): Promise<void> {
+    let messages: ExtractionSnapshot | undefined = initialMessages
     while (messages) {
       try {
-        await this.#runOnce(messages)
+        await this.#runOnce(messages.messages, messages.userContext)
       } catch {
         // Best effort: leave the cursor unchanged so a later turn can retry.
       }
@@ -85,7 +96,10 @@ export class ExtractMemories {
     }
   }
 
-  async #runOnce(messages: readonly TranscriptMessage[]): Promise<void> {
+  async #runOnce(
+    messages: readonly TranscriptMessage[],
+    userContext?: Readonly<Record<string, string>>,
+  ): Promise<void> {
     const newMessages = messagesAfter(messages, this.#lastMemoryMessageUuid)
     if (newMessages.length === 0) return
     const lastMessage = messages.at(-1)
@@ -120,7 +134,7 @@ export class ExtractMemories {
       modelId: this.#modelId,
       systemPrompt: this.#systemPrompt,
       tools: this.#tools,
-      ...(this.#userContext ? { userContext: this.#userContext } : {}),
+      ...(userContext ? { userContext } : {}),
     })
     let next = await generator.next()
     while (!next.done) next = await generator.next()

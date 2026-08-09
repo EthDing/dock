@@ -1,15 +1,15 @@
-import { TuiMainScreen, type Terminal } from '@dock/tui'
+import { type Terminal, TuiMainScreen } from '@dock/tui'
 import { describe, expect, it } from 'vitest'
-import {
-  DockTuiApp,
-  type DockSessionCommands,
-  type DockUiController,
-} from '../../src/ui/dock-tui-app.js'
-import { SandboxNetworkPermissionBroker } from '../../src/sandbox/network-permission-broker.js'
-import type { DockSandboxMode } from '../../src/sandbox/dock-sandbox.js'
 import { MemoryNotificationBroker } from '../../src/memory/memory-notification-broker.js'
 import { PermissionBroker } from '../../src/permissions/permission-broker.js'
+import type { DockSandboxMode } from '../../src/sandbox/dock-sandbox.js'
+import { SandboxNetworkPermissionBroker } from '../../src/sandbox/network-permission-broker.js'
 import type { AgentTool } from '../../src/tools/types.js'
+import {
+  type DockSessionCommands,
+  DockTuiApp,
+  type DockUiController,
+} from '../../src/ui/dock-tui-app.js'
 
 class MemoryTerminal implements Terminal {
   columns = 80
@@ -315,6 +315,32 @@ describe('DockTuiApp', () => {
     await submission
 
     expect(mode).toBe('auto-allow')
+    await app.stop()
+  })
+
+  it('marks manual compaction busy, routes Escape, and never reports cancellation as success', async () => {
+    let rejectCompact!: (error: Error) => void
+    const controller: DockUiController = {
+      async *submit() {},
+      close: async () => {},
+      compact: () =>
+        new Promise<void>((_, reject) => {
+          rejectCompact = reject
+        }),
+      abort: () => rejectCompact(new Error('Compaction cancelled')),
+    }
+    const terminal = new MemoryTerminal()
+    const tui = new TuiMainScreen(terminal)
+    const app = new DockTuiApp({ controller, tui })
+    app.start()
+    const pending = app.submit('/compact')
+    await Promise.resolve()
+    expect(tui.render(80).join('\n')).toContain('compacting')
+    terminal.send('\u001b')
+    await pending
+    const rendered = tui.render(80).join('\n')
+    expect(rendered).toContain('Compaction cancelled')
+    expect(rendered).not.toContain('Conversation compacted')
     await app.stop()
   })
 })

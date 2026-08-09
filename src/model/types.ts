@@ -34,6 +34,7 @@ export type UserMessage = {
 export type StopReason = 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use'
 
 export type Usage = {
+  // Total input, including cache reads/writes. Adapters normalize wire semantics.
   inputTokens?: number
   outputTokens?: number
   cacheReadInputTokens?: number
@@ -57,6 +58,7 @@ export type ModelToolDefinition = {
 }
 
 export type ModelRequest = {
+  cachePrefixMessageCount?: number
   maxOutputTokens?: number
   modelId: string
   systemPrompt: readonly string[]

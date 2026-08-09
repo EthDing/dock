@@ -11,6 +11,14 @@ export type FileReadSnapshot = {
 export class FileReadState {
   readonly #entries = new Map<string, FileReadSnapshot>()
 
+  entries(): Array<[string, FileReadSnapshot]> {
+    return [...this.#entries.entries()]
+  }
+
+  clear(): void {
+    this.#entries.clear()
+  }
+
   get(filePath: string): FileReadSnapshot | undefined {
     return this.#entries.get(resolve(filePath))
   }

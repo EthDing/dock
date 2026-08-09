@@ -1,140 +1,150 @@
-import type { TranscriptMessage } from '../messages/create-message.js'
-import { createUserMessage } from '../messages/create-message.js'
-import type { ModelToolDefinition } from '../model/types.js'
+import { buildModelRequest, type RequestContext, roughRequestTokens } from '../agent/request.js'
+import type { TranscriptMessage, UserTranscriptMessage } from '../messages/create-message.js'
+import type { ModelRequest, ModelToolDefinition } from '../model/types.js'
+import {
+  buildPostCompactMessages,
+  type CompactionRequest,
+  type CompactionResult,
+} from './compaction.js'
+import { clearOldToolResults, type ToolResultClearingSettings } from './tool-result-clearing.js'
 
-const MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000
-const AUTOCOMPACT_BUFFER_TOKENS = 13_000
-
-export type ContextAnalysis = {
-  estimatedTokens: number
-  threshold: number
-  shouldCompact: boolean
+export type ContextAnalysis = { estimatedTokens: number; threshold: number; shouldCompact: boolean }
+export type CompactionRestoration = {
+  attachments: readonly UserTranscriptMessage[]
+  userContext?: Readonly<Record<string, string>>
+  commit: () => void
+}
+export type PreparedCompaction = CompactionResult & {
+  userContext?: Readonly<Record<string, string>>
+  commit: () => void
 }
 
-export type ContextPreparation = {
-  analysis: ContextAnalysis
-  compacted: boolean
-  messages: readonly TranscriptMessage[]
+export type ContextManagerOptions = {
+  contextWindow: number
+  maxOutputTokens: number
+  summarize: (request: CompactionRequest) => Promise<CompactionResult>
+  toolResultClearing?: ToolResultClearingSettings | undefined
+  prepareRestoration?: (signal: AbortSignal) => Promise<CompactionRestoration>
+  now?: () => number
 }
-
 export class ContextManager {
-  readonly #contextWindow: number
-  readonly #maxOutputTokens: number
-  readonly #preserveRecentMessages: number
-  readonly #summarize: (input: { instructions?: string; transcript: string }) => Promise<string>
-
-  constructor(options: {
-    contextWindow: number
-    maxOutputTokens: number
-    preserveRecentMessages?: number
-    summarize: (input: { instructions?: string; transcript: string }) => Promise<string>
-  }) {
-    this.#contextWindow = options.contextWindow
-    this.#maxOutputTokens = options.maxOutputTokens
-    this.#preserveRecentMessages = options.preserveRecentMessages ?? 4
-    this.#summarize = options.summarize
+  readonly #options: ContextManagerOptions
+  #failures = 0
+  constructor(options: ContextManagerOptions) {
+    this.#options = options
   }
 
   analyze(
     messages: readonly TranscriptMessage[],
     systemPrompt: readonly string[] = [],
     tools: readonly ModelToolDefinition[] = [],
+    userContext?: Readonly<Record<string, string>>,
   ): ContextAnalysis {
-    const estimatedTokens = estimateContextTokens(messages, systemPrompt, tools)
-    const threshold = getAutoCompactThreshold(this.#contextWindow, this.#maxOutputTokens)
-    return { estimatedTokens, shouldCompact: estimatedTokens >= threshold, threshold }
+    const estimatedTokens = estimateContextTokens(messages, systemPrompt, tools, userContext)
+    const threshold = getAutoCompactThreshold(
+      this.#options.contextWindow,
+      this.#options.maxOutputTokens,
+    )
+    return { estimatedTokens, threshold, shouldCompact: estimatedTokens >= threshold }
   }
-
-  async prepare(
-    messages: readonly TranscriptMessage[],
-    options: { systemPrompt?: readonly string[]; tools?: readonly ModelToolDefinition[] } = {},
-  ): Promise<ContextPreparation> {
-    const pruned = clearOldToolResults(messages)
-    const analysis = this.analyze(pruned, options.systemPrompt, options.tools)
-    if (!analysis.shouldCompact || pruned.length <= this.#preserveRecentMessages) {
-      return { analysis, compacted: false, messages: pruned }
-    }
-    const compacted = await this.compact(pruned)
-    return { analysis, compacted: true, messages: compacted }
+  clear(messages: readonly TranscriptMessage[]) {
+    return clearOldToolResults(
+      messages,
+      this.#options.toolResultClearing,
+      this.#options.now?.() ?? Date.now(),
+    )
   }
-
+  shouldAutoCompact(messages: readonly TranscriptMessage[], context: RequestContext): boolean {
+    return (
+      this.#failures < 3 &&
+      this.analyze(messages, context.systemPrompt, context.tools, context.userContext).shouldCompact
+    )
+  }
   async compact(
     messages: readonly TranscriptMessage[],
+    request: ModelRequest,
+    signal: AbortSignal,
+    trigger: 'auto' | 'manual',
     instructions?: string,
-  ): Promise<readonly TranscriptMessage[]> {
-    const splitAt = Math.max(1, messages.length - this.#preserveRecentMessages)
-    const summarized = messages.slice(0, splitAt)
-    const preserved = messages.slice(splitAt)
-    const summary = await this.#summarize({
-      ...(instructions ? { instructions } : {}),
-      transcript: renderTranscript(summarized),
-    })
-    return [
-      createUserMessage({ content: [{ text: summary, type: 'text' }] }, { isCompactSummary: true }),
-      ...preserved,
-    ]
+  ): Promise<PreparedCompaction> {
+    try {
+      signal.throwIfAborted()
+      if (!messages.length) throw new Error('Not enough messages to compact')
+      const result = await this.#options.summarize({
+        messages,
+        request,
+        signal,
+        trigger,
+        ...(instructions ? { instructions } : {}),
+      })
+      const restoration = await this.#options.prepareRestoration?.(signal)
+      signal.throwIfAborted()
+      const prepared = {
+        ...result,
+        trigger,
+        attachments: restoration?.attachments ?? result.attachments,
+      }
+      const output = buildPostCompactMessages(prepared)
+      const restoredRequest =
+        restoration?.userContext !== undefined
+          ? buildModelRequest(output, { ...request, userContext: restoration.userContext })
+          : {
+              ...request,
+              messages: [
+                ...request.messages.slice(0, request.messages.length - messages.length),
+                ...output.map((m) => m.message),
+              ],
+            }
+      let committed = false
+      return {
+        ...prepared,
+        preTokens: roughRequestTokens(request),
+        postTokens: roughRequestTokens(restoredRequest),
+        ...(restoration?.userContext !== undefined ? { userContext: restoration.userContext } : {}),
+        // Preparation is side-effect free. Call only after the durable boundary.
+        commit: () => {
+          if (committed) return
+          committed = true
+          restoration?.commit()
+          this.#failures = 0
+        },
+      }
+    } catch (error) {
+      if (trigger === 'auto' && !signal.aborted) this.#failures++
+      throw error
+    }
   }
 }
-
 export function getAutoCompactThreshold(contextWindow: number, maxOutputTokens: number): number {
-  const reserved = Math.min(maxOutputTokens, MAX_OUTPUT_TOKENS_FOR_SUMMARY)
-  return Math.max(1, contextWindow - reserved - AUTOCOMPACT_BUFFER_TOKENS)
+  return Math.max(1, contextWindow - Math.min(maxOutputTokens, 20_000) - 13_000)
 }
 
 export function estimateContextTokens(
   messages: readonly TranscriptMessage[],
   systemPrompt: readonly string[] = [],
   tools: readonly ModelToolDefinition[] = [],
+  userContext?: Readonly<Record<string, string>>,
 ): number {
-  const latestUsage = [...messages].reverse().find((message) => message.type === 'assistant')
-    ?.message.usage
-  if (latestUsage?.inputTokens !== undefined) {
-    return latestUsage.inputTokens + (latestUsage.outputTokens ?? 0)
+  const current = roughRequestTokens(
+    buildModelRequest(messages, {
+      modelId: '',
+      systemPrompt,
+      tools,
+      ...(userContext ? { userContext } : {}),
+    }),
+  )
+  const last = messages.findLast((message) => message.type === 'assistant')
+  // A saved request baseline makes edits to older results and newly appended
+  // messages visible without treating cache hits as a smaller context window.
+  if (
+    last?.type === 'assistant' &&
+    last.requestTokenEstimate !== undefined &&
+    last.message.usage.inputTokens !== undefined
+  ) {
+    return Math.max(
+      0,
+      Math.ceil(last.message.usage.inputTokens + current - last.requestTokenEstimate),
+    )
   }
-  const serialized = JSON.stringify({
-    messages: messages.map((message) => message.message),
-    systemPrompt,
-    tools,
-  })
-  return Math.ceil(serialized.length / 4)
-}
-
-function clearOldToolResults(messages: readonly TranscriptMessage[]): TranscriptMessage[] {
-  let remaining = 3
-  return [...messages]
-    .reverse()
-    .map((message) => {
-      if (message.type !== 'user') return message
-      const content = [...message.message.content].reverse().map((block) => {
-        if (block.type !== 'tool_result') return block
-        if (remaining > 0) {
-          remaining -= 1
-          return block
-        }
-        return { ...block, content: '[Old tool result content cleared]' }
-      })
-      return {
-        ...message,
-        message: { ...message.message, content: content.reverse() },
-      }
-    })
-    .reverse()
-}
-
-function renderTranscript(messages: readonly TranscriptMessage[]): string {
-  return messages
-    .map((entry) => {
-      const content = entry.message.content
-        .map((block) => {
-          if (block.type === 'text') return block.text
-          if (block.type === 'thinking') return `[thinking]\n${block.thinking}`
-          if (block.type === 'tool_use') {
-            return `[tool_use ${block.name}]\n${JSON.stringify(block.input)}`
-          }
-          return `[tool_result ${block.toolUseId}]\n${block.content}`
-        })
-        .join('\n')
-      return `${entry.type.toUpperCase()}:\n${content}`
-    })
-    .join('\n\n')
+  return current
 }

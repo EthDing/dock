@@ -61,6 +61,19 @@ const sandboxSettingsSchema = z
 
 const settingsSchema = z
   .object({
+    contextManagement: z
+      .object({
+        toolResultClearing: z
+          .object({
+            enabled: z.boolean().optional(),
+            gapThresholdMinutes: z.number().finite().positive().optional(),
+            keepRecent: z.number().int().positive().optional(),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
     autoMemoryDirectory: z.string().min(1).optional(),
     autoMemoryEnabled: z.boolean().optional(),
     cleanupPeriodDays: z.number().int().nonnegative().optional(),
@@ -132,6 +145,16 @@ function mergeSettings(base: DockSettings, override: DockSettings): DockSettings
     ...(permissions ? { permissions } : {}),
     ...(providers ? { providers } : {}),
     ...(sandbox ? { sandbox } : {}),
+    ...(base.contextManagement || override.contextManagement
+      ? {
+          contextManagement: {
+            toolResultClearing: {
+              ...base.contextManagement?.toolResultClearing,
+              ...override.contextManagement?.toolResultClearing,
+            },
+          },
+        }
+      : {}),
   }
 }
 

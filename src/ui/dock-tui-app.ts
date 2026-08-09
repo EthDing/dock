@@ -1,23 +1,23 @@
-import { Editor, Key, Markdown, SelectList, Spacer, Text, matchesKey, type TUI } from '@dock/tui'
+import { Editor, Key, Markdown, matchesKey, SelectList, Spacer, Text, type TUI } from '@dock/tui'
 import type { AgentEvent } from '../agent/run-agent-loop.js'
 import type {
   MemoryNotification,
   MemoryNotificationBroker,
 } from '../memory/memory-notification-broker.js'
+import type { TranscriptMessage } from '../messages/create-message.js'
+import type { ToolUseBlock } from '../model/types.js'
+import type { PermissionMode } from '../permissions/evaluate-permission.js'
 import type {
   PermissionApproval,
   PermissionBroker,
   PermissionRequest,
 } from '../permissions/permission-broker.js'
-import type { PermissionMode } from '../permissions/evaluate-permission.js'
+import type { DockSandboxMode } from '../sandbox/dock-sandbox.js'
 import type {
   SandboxNetworkPermissionBroker,
   SandboxNetworkRequest,
   SandboxNetworkResponse,
 } from '../sandbox/network-permission-broker.js'
-import type { DockSandboxMode } from '../sandbox/dock-sandbox.js'
-import type { TranscriptMessage } from '../messages/create-message.js'
-import type { ToolUseBlock } from '../model/types.js'
 import { editorTheme, markdownTheme, selectListTheme } from './themes.js'
 
 export type DockUiController = {
@@ -179,10 +179,34 @@ export class DockTuiApp {
       this.#tui.requestRender()
       return
     }
-    if (trimmed.startsWith('/compact')) {
-      await this.#controller.compact?.(trimmed.slice('/compact'.length).trim() || undefined)
-      this.#insertTranscript(new Text('Conversation compacted', 1, 0))
+    if (trimmed === '/compact' || trimmed.startsWith('/compact ')) {
+      this.#busy = true
+      this.#editor.disableSubmit = true
+      this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · compacting`)
       this.#tui.requestRender()
+      try {
+        if (!this.#controller.compact) throw new Error('Compaction is unavailable')
+        await this.#controller.compact(trimmed.slice('/compact'.length).trim() || undefined)
+        this.#insertTranscript(new Text('Conversation compacted', 1, 0))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.#insertTranscript(
+          new Text(
+            /cancel|abort/i.test(message)
+              ? 'Compaction cancelled'
+              : `Compaction failed: ${message}`,
+            1,
+            0,
+          ),
+        )
+      } finally {
+        this.#busy = false
+        this.#editor.disableSubmit = false
+        this.#setReadyStatus()
+        this.#tui.requestRender()
+      }
+      const queued = this.#queue.shift()
+      if (queued) await this.submit(queued)
       return
     }
     if (trimmed.startsWith('/rename ')) {
@@ -266,7 +290,23 @@ export class DockTuiApp {
           this.#insertTranscript(
             new Text(event.result.isError ? `  Error: ${event.result.content}` : '  Done', 1, 0),
           )
+        } else if (event.type === 'compaction_status') {
+          if (event.status === 'started')
+            this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · compacting`)
+          else {
+            this.#insertTranscript(
+              new Text(
+                event.status === 'cancelled'
+                  ? 'Compaction cancelled'
+                  : `Compaction failed: ${event.message ?? 'Unknown error'}`,
+                1,
+                0,
+              ),
+            )
+            this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · working`)
+          }
         } else if (event.type === 'compact') {
+          this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · working`)
           this.#insertTranscript(new Text('  Conversation compacted', 1, 0))
         }
         this.#tui.requestRender()

@@ -17,18 +17,15 @@ export class AnthropicMessagesAdapter implements ModelAdapter {
     request: ModelRequest,
     options: { signal: AbortSignal },
   ): AsyncGenerator<ModelStreamEvent> {
+    const cached = prepareCachedPayload(request)
     const stream = await this.#client.messages.create(
       {
         max_tokens: request.maxOutputTokens ?? 8192,
-        messages: request.messages.map(toAnthropicMessage),
+        messages: cached.messages,
         model: request.modelId,
         stream: true,
-        system: request.systemPrompt.join('\n\n'),
-        tools: request.tools.map((tool) => ({
-          description: tool.description,
-          input_schema: tool.inputSchema,
-          name: tool.name,
-        })),
+        system: cached.system,
+        tools: cached.tools,
       },
       { signal: options.signal },
     )
@@ -125,11 +122,11 @@ export class AnthropicMessagesAdapter implements ModelAdapter {
   }
 }
 
-function toAnthropicMessage(message: ModelRequest['messages'][number]): unknown {
+function toAnthropicMessage(message: ModelRequest['messages'][number]): WireMessage {
   return {
     role: message.role,
     content: message.content.map((block) => {
-      if (block.type === 'text') return block
+      if (block.type === 'text') return { ...block }
       if (block.type === 'tool_result') {
         return {
           content: block.content,
@@ -158,7 +155,20 @@ function optionalUsage(value: Record<string, unknown> | undefined): { usage?: Us
 function toUsage(value: Record<string, unknown> | undefined): Usage {
   if (!value) return {}
   return {
-    ...(typeof value.input_tokens === 'number' ? { inputTokens: value.input_tokens } : {}),
+    ...(['input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'].some(
+      (key) => typeof value[key] === 'number',
+    )
+      ? {
+          inputTokens: [
+            'input_tokens',
+            'cache_read_input_tokens',
+            'cache_creation_input_tokens',
+          ].reduce(
+            (total, key) => total + (typeof value[key] === 'number' ? (value[key] as number) : 0),
+            0,
+          ),
+        }
+      : {}),
     ...(typeof value.output_tokens === 'number' ? { outputTokens: value.output_tokens } : {}),
     ...(typeof value.cache_read_input_tokens === 'number'
       ? { cacheReadInputTokens: value.cache_read_input_tokens }
@@ -182,4 +192,35 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined
+}
+type WireMessage = { role: 'user' | 'assistant'; content: Array<Record<string, unknown>> }
+function prepareCachedPayload(request: ModelRequest) {
+  const messages = request.messages.map(toAnthropicMessage)
+  const tools: Array<Record<string, unknown>> = request.tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.inputSchema,
+  }))
+  const system: Array<Record<string, unknown>> = request.systemPrompt.length
+    ? [{ type: 'text', text: request.systemPrompt.join('\n\n') }]
+    : []
+  const end = Math.min(request.cachePrefixMessageCount ?? messages.length, messages.length)
+  if (end > 0) {
+    const cacheControl = { type: 'ephemeral' }
+    const systemTail = system.at(-1)
+    const toolTail = tools.at(-1)
+    if (systemTail) systemTail.cache_control = cacheControl
+    if (toolTail) toolTail.cache_control = cacheControl
+    // Two history breakpoints retain the previous request boundary when the
+    // assistant response is appended. Never mark the fork's summary instruction.
+    let remaining = 2
+    for (let index = end - 1; index >= 0 && remaining > 0; index--) {
+      const block = messages[index]?.content.findLast((value) => value.type !== 'thinking')
+      if (block) {
+        block.cache_control = cacheControl
+        remaining--
+      }
+    }
+  }
+  return { messages, tools, system }
 }
