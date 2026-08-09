@@ -76,6 +76,34 @@ Startup session flags include `--continue`, `--resume <id|name>`, `--fork-sessio
 - `/context`, `/compact [instructions]`, and `/rewind` manage the active context and checkpoints.
 - `/exit` closes the session cleanly.
 
+## Context compaction
+
+Automatic compaction first checks time-based tool-result clearing, then summarizes only if
+the context is still above its threshold. Manual `/compact [instructions]` requests a summary
+directly. Escape cancels compaction without committing a new summary.
+
+The following optional settings use the normal user/project/local precedence:
+
+```json
+{
+  "contextManagement": {
+    "toolResultClearing": {
+      "enabled": true,
+      "gapThresholdMinutes": 60,
+      "keepRecent": 5
+    }
+  }
+}
+```
+
+These are Dock's defaults. Enabling time-based clearing by default is an explicitly approved
+difference from the reference snapshot. Clearing replaces older tool-result bodies, not user
+messages, and does not save large tool outputs to separate files. See
+[the compact internals](docs/internals/compact.md) for request, recovery and persistence boundaries.
+
+`pnpm exec tsx scripts/smoke-compaction.mts` runs a small, billed check against the configured
+provider using synthetic content only. Cache reuse must be verified from returned usage.
+
 ## Bash sandbox
 
 On Linux or WSL2, install the Sandbox Runtime system dependencies once:
