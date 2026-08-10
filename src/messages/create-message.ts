@@ -2,6 +2,7 @@ import { randomUUID, type UUID } from 'node:crypto'
 import type { AssistantMessage, UserMessage } from '../model/types.js'
 
 export type UserTranscriptMessage = {
+  agentEventKey?: string
   isMeta?: true
   isCompactSummary?: true
   type: 'user'

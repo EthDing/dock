@@ -1,4 +1,5 @@
 import type { UUID } from 'node:crypto'
+import type { AgentSnapshot } from '../agents/types.js'
 import { buildPostCompactMessages } from '../context/compaction.js'
 import type { ContextManager, PreparedCompaction } from '../context/context-manager.js'
 import {
@@ -21,6 +22,13 @@ import type { AgentTool, AgentToolResult, CanUseTool } from '../tools/types.js'
 import { buildModelRequest, roughRequestTokens } from './request.js'
 
 export type AgentLoopOptions = {
+  getAgentIdentity?: () => Omit<
+    AgentSnapshot,
+    'messages' | 'systemPrompt' | 'userContext' | 'tools'
+  >
+  getPendingMessages?: (
+    messages: readonly TranscriptMessage[],
+  ) => Promise<readonly UserTranscriptMessage[]>
   canUseTool?: CanUseTool
   contextManager?: ContextManager
   model: ModelAdapter
@@ -69,6 +77,11 @@ export async function* runAgentLoop(
 
   try {
     while (!controller.signal.aborted) {
+      for (const message of (await options.getPendingMessages?.(messages)) ?? []) {
+        if (messages.some((existing) => existing.uuid === message.uuid)) continue
+        messages.push(message)
+        yield { type: 'user_message', message }
+      }
       const toolDefinitions = options.tools.map(({ description, inputSchema, name }) => ({
         description,
         inputSchema,
@@ -154,6 +167,9 @@ export async function* runAgentLoop(
 
       const toolUses = content.filter((block): block is ToolUseBlock => block.type === 'tool_use')
       if (toolUses.length === 0) {
+        const pending = (await options.getPendingMessages?.(messages)) ?? []
+        if (pending.some((message) => !messages.some((existing) => existing.uuid === message.uuid)))
+          continue
         return { messages, reason: 'completed' }
       }
 
@@ -180,6 +196,16 @@ export async function* runAgentLoop(
                 controller.signal,
                 assistantMessage.uuid,
                 options.canUseTool,
+                options.getAgentIdentity
+                  ? {
+                      ...options.getAgentIdentity(),
+                      messages: [...messages],
+                      systemPrompt: options.systemPrompt,
+                      userContext,
+                      tools: toolDefinitions,
+                      maxOutputTokens: options.maxOutputTokens,
+                    }
+                  : undefined,
               ),
             ),
           )
@@ -193,6 +219,16 @@ export async function* runAgentLoop(
               controller.signal,
               assistantMessage.uuid,
               options.canUseTool,
+              options.getAgentIdentity
+                ? {
+                    ...options.getAgentIdentity(),
+                    messages: [...messages],
+                    systemPrompt: options.systemPrompt,
+                    userContext,
+                    tools: toolDefinitions,
+                    maxOutputTokens: options.maxOutputTokens,
+                  }
+                : undefined,
             ),
           ]
         }
@@ -263,6 +299,7 @@ async function executeToolUse(
   signal: AbortSignal,
   parentMessageUuid: UUID,
   canUseTool?: CanUseTool,
+  agent?: AgentSnapshot,
 ): Promise<ToolResultBlock> {
   const tool = tools.find((candidate) => candidate.name === toolUse.name)
   let result: AgentToolResult
@@ -287,6 +324,7 @@ async function executeToolUse(
       parentMessageUuid,
       signal,
       toolUseId: toolUse.id,
+      ...(agent ? { agent } : {}),
     })
     if (decision?.behavior === 'deny') {
       return {
@@ -303,6 +341,7 @@ async function executeToolUse(
           parentMessageUuid,
           signal,
           toolUseId: toolUse.id,
+          ...(agent ? { agent } : {}),
         },
       )
     } catch (error) {

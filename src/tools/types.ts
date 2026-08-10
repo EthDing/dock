@@ -1,10 +1,18 @@
 import type { UUID } from 'node:crypto'
+import type { AgentSnapshot } from '../agents/types.js'
 import type { JsonObject, JsonSchema } from '../model/types.js'
 import type { PermissionResult, ToolPermissionContext } from '../permissions/evaluate-permission.js'
 
 export type AgentToolResult = {
   content: string
   isError?: boolean
+}
+
+export type ToolExecutionContext = {
+  parentMessageUuid: UUID
+  signal: AbortSignal
+  toolUseId: string
+  agent?: AgentSnapshot | undefined
 }
 
 export type AgentTool = {
@@ -18,10 +26,7 @@ export type AgentTool = {
   getPermissionRule?: (input: JsonObject) => string | undefined
   isConcurrencySafe: (input: JsonObject) => boolean
   parseInput?: (input: JsonObject) => JsonObject
-  execute: (
-    input: JsonObject,
-    options: { parentMessageUuid: UUID; signal: AbortSignal; toolUseId: string },
-  ) => Promise<AgentToolResult>
+  execute: (input: JsonObject, options: ToolExecutionContext) => Promise<AgentToolResult>
 }
 
 export type ToolUseDecision =
@@ -31,5 +36,5 @@ export type ToolUseDecision =
 export type CanUseTool = (
   tool: AgentTool,
   input: JsonObject,
-  options: { parentMessageUuid: UUID; signal: AbortSignal; toolUseId: string },
+  options: ToolExecutionContext,
 ) => Promise<ToolUseDecision>

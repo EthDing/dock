@@ -1,6 +1,6 @@
 import { createHash, type UUID } from 'node:crypto'
 import { type FileHandle, mkdir, open, readFile, unlink } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import type { FileHistorySnapshot } from '../checkpoint/file-history.js'
 import type { CompactionResult } from '../context/compaction.js'
 import { applyClearedToolResults } from '../context/tool-result-clearing.js'
@@ -8,6 +8,9 @@ import type { TranscriptMessage } from '../messages/create-message.js'
 import { asSessionId, isUuid, type SessionId } from './ids.js'
 
 export type SessionMetadataRecord = {
+  agentId?: UUID
+  agentCwd?: string
+  parentAgentId?: UUID
   type: 'session_start'
   version: 1
   sessionId: SessionId
@@ -85,12 +88,15 @@ export type LoadedSession = {
 }
 
 type SessionLocation = {
+  agentId?: UUID
   configDir: string
   cwd: string
   sessionId: SessionId
 }
 
 type WriterOptions = SessionLocation & {
+  agentCwd?: string
+  parentAgentId?: UUID
   forkedFromSessionId?: SessionId
   name?: string
   now?: () => Date
@@ -132,7 +138,7 @@ export class SessionWriter {
 
   static async create(options: WriterOptions): Promise<SessionWriter> {
     const sessionPath = getSessionPath(options)
-    await mkdir(getProjectSessionsDirectory(options), { recursive: true, mode: 0o700 })
+    await mkdir(dirname(sessionPath), { recursive: true, mode: 0o700 })
     const { handle: lock, path: lockPath } = await acquireLock(sessionPath)
 
     let file: FileHandle | undefined
@@ -140,6 +146,9 @@ export class SessionWriter {
       file = await open(sessionPath, 'wx', 0o600)
       const now = options.now ?? (() => new Date())
       const metadata: SessionMetadataRecord = {
+        ...(options.agentId ? { agentId: options.agentId } : {}),
+        ...(options.agentCwd ? { agentCwd: options.agentCwd } : {}),
+        ...(options.parentAgentId ? { parentAgentId: options.parentAgentId } : {}),
         createdAt: now().toISOString(),
         cwd: resolve(options.cwd),
         ...(options.forkedFromSessionId
@@ -389,6 +398,15 @@ export async function loadSession(location: SessionLocation): Promise<LoadedSess
 }
 
 export function getSessionPath(location: SessionLocation): string {
+  if (location.agentId) {
+    if (!isUuid(location.agentId)) throw new Error('Invalid agent ID')
+    return join(
+      getProjectSessionsDirectory(location),
+      location.sessionId,
+      'subagents',
+      `agent-${location.agentId}.jsonl`,
+    )
+  }
   return join(getProjectSessionsDirectory(location), `${location.sessionId}.jsonl`)
 }
 
