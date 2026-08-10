@@ -1,3 +1,4 @@
+import type { AgentSnapshot, AgentView } from '../agents/types.js'
 import { Editor, Key, Markdown, matchesKey, SelectList, Spacer, Text, type TUI } from '@dock/tui'
 import type { AgentEvent } from '../agent/run-agent-loop.js'
 import type {
@@ -21,6 +22,8 @@ import type {
 import { editorTheme, markdownTheme, selectListTheme } from './themes.js'
 
 export type DockUiController = {
+  getSnapshot?: () => AgentSnapshot
+  processNotifications?: () => AsyncIterable<AgentEvent>
   abort: (reason?: unknown) => void
   close: () => Promise<void>
   submit: (text: string) => AsyncIterable<AgentEvent>
@@ -53,6 +56,16 @@ export type DockSandboxCommands = {
   setMode: (mode: DockSandboxMode) => Promise<void>
 }
 
+export type DockAgentCommands = {
+  list: () => Promise<AgentView[]>
+  launch: (prompt: string) => Promise<AgentView>
+  snapshot: (id: string) => Promise<{ agent: AgentView; messages: readonly TranscriptMessage[] }>
+  stop: (id: string) => Promise<AgentView>
+  send: (id: string, text: string) => Promise<unknown>
+  background: () => Promise<void>
+  close: () => Promise<void>
+}
+
 export class DockTuiApp {
   readonly #controller: DockUiController
   readonly #editor: Editor
@@ -64,11 +77,18 @@ export class DockTuiApp {
   readonly #queue: string[] = []
   readonly #stopped: Promise<void>
   readonly #resolveStopped: () => void
+  readonly #agentCommands: DockAgentCommands | undefined
+  #closing = false
+  #pendingTasks = false
+  readonly #cancelModals = new Set<() => void>()
+  #modal = 0
+  #modalTail: Promise<unknown> = Promise.resolve()
   #busy = false
   #lastEscapeAt = 0
 
   constructor(options: {
     controller: DockUiController
+    agentCommands?: DockAgentCommands
     memoryNotificationBroker?: MemoryNotificationBroker
     permissionBroker?: PermissionBroker
     sandboxNetworkPermissionBroker?: SandboxNetworkPermissionBroker
@@ -77,6 +97,7 @@ export class DockTuiApp {
     startupNotices?: readonly string[]
     tui: TUI
   }) {
+    this.#agentCommands = options.agentCommands
     this.#controller = options.controller
     this.#tui = options.tui
     this.#sessionCommands = options.sessionCommands
@@ -105,6 +126,11 @@ export class DockTuiApp {
       void this.submit(text).catch((error) => this.#showError(error))
     }
     this.#tui.addInputListener((data) => {
+      if (matchesKey(data, Key.ctrl('b'))) {
+        void this.#agentCommands?.background().catch((error) => this.#showError(error))
+        return { consume: true }
+      }
+      if (this.#modal > 0 && matchesKey(data, Key.escape)) return undefined
       if (matchesKey(data, Key.ctrl('c'))) {
         if (this.#busy) this.#controller.abort('interrupt')
         else void this.stop()
@@ -145,9 +171,17 @@ export class DockTuiApp {
   }
 
   async stop(): Promise<void> {
-    await this.#controller.close()
-    this.#tui.stop()
-    this.#resolveStopped()
+    if (this.#closing) return this.#stopped
+    this.#closing = true
+    for (const cancel of this.#cancelModals) cancel()
+    this.#controller.abort('shutdown')
+    try {
+      await this.#agentCommands?.close()
+      await this.#controller.close()
+    } finally {
+      this.#tui.stop()
+      this.#resolveStopped()
+    }
   }
 
   waitUntilStopped(): Promise<void> {
@@ -156,9 +190,13 @@ export class DockTuiApp {
 
   async submit(text: string): Promise<void> {
     const trimmed = text.trim()
-    if (!trimmed) return
+    if (!trimmed || this.#closing) return
     if (trimmed === '/exit') {
       await this.stop()
+      return
+    }
+    if (trimmed === '/tasks' || trimmed.startsWith('/tasks ')) {
+      await this.#tasksCommand(trimmed.slice('/tasks'.length).trim())
       return
     }
     if (this.#busy) {
@@ -169,9 +207,31 @@ export class DockTuiApp {
       this.#tui.requestRender()
       return
     }
+    if (trimmed === '/subtask' || trimmed.startsWith('/subtask ')) {
+      const prompt = trimmed.slice('/subtask'.length).trim()
+      if (!prompt) {
+        this.#insertTranscript(new Text('Usage: /subtask <task> — fork the current context', 1, 0))
+        this.#tui.requestRender()
+        return
+      }
+      if (!this.#agentCommands) throw new Error('Subagents unavailable')
+      this.#busy = true
+      try {
+        const agent = await this.#agentCommands.launch(prompt)
+        this.#insertTranscript(
+          new Text(`Agent ${agent.id} · ${agent.status} · ${agent.outputFile}`, 1, 0),
+        )
+      } finally {
+        this.#busy = false
+        this.#tui.requestRender()
+        this.notifyTasksChanged()
+      }
+      return
+    }
     if (trimmed === '/clear') {
       await this.#sessionCommands?.clear()
       this.#clearTranscript()
+      this.notifyTasksChanged()
       return
     }
     if (trimmed === '/context') {
@@ -207,6 +267,7 @@ export class DockTuiApp {
       }
       const queued = this.#queue.shift()
       if (queued) await this.submit(queued)
+      else this.#flushTasks()
       return
     }
     if (trimmed.startsWith('/rename ')) {
@@ -251,9 +312,13 @@ export class DockTuiApp {
       this.#tui.requestRender()
       return
     }
+    this.#insertTranscript(new Markdown(`**You**\n\n${trimmed}`, 1, 0, markdownTheme))
+    await this.#renderRun(this.#controller.submit(trimmed))
+  }
+
+  async #renderRun(events: AsyncIterable<AgentEvent>): Promise<void> {
     this.#busy = true
     this.#editor.disableSubmit = true
-    this.#insertTranscript(new Markdown(`**You**\n\n${trimmed}`, 1, 0, markdownTheme))
     this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · working`)
     let assistant: Markdown | undefined
     let assistantText = ''
@@ -261,7 +326,16 @@ export class DockTuiApp {
     let thinkingText = ''
 
     try {
-      for await (const event of this.#controller.submit(trimmed)) {
+      for await (const event of events) {
+        if (event.type === 'assistant_message') {
+          assistant = undefined
+          assistantText = ''
+          thinking = undefined
+          thinkingText = ''
+        }
+        if (event.type === 'user_message' && event.message.agentEventKey) {
+          this.#insertTranscript(new Text('Subagent update received', 1, 0))
+        }
         if (
           event.type === 'model_stream' &&
           event.event.type === 'content_block_delta' &&
@@ -324,6 +398,74 @@ export class DockTuiApp {
 
     const queued = this.#queue.shift()
     if (queued) await this.submit(queued)
+    else this.#flushTasks()
+  }
+
+  notifyTasksChanged(): void {
+    if (this.#closing) return
+    this.#pendingTasks = true
+    queueMicrotask(() => this.#flushTasks())
+  }
+
+  #flushTasks(): void {
+    if (!this.#pendingTasks || this.#busy || this.#modal > 0 || this.#closing) return
+    this.#pendingTasks = false
+    if (this.#controller.processNotifications) {
+      void this.#renderRun(this.#controller.processNotifications()).catch((error) =>
+        this.#showError(error),
+      )
+    }
+  }
+
+  async #tasksCommand(args: string): Promise<void> {
+    if (!this.#agentCommands) throw new Error('Subagents unavailable')
+    const [action, id, ...rest] = args.split(/\s+/)
+    if (!action) {
+      const tasks = await this.#agentCommands.list()
+      this.#insertTranscript(
+        new Text(
+          tasks
+            .map((a) => `${a.id} · ${a.name ?? a.description} · ${a.status}\n  ${a.outputFile}`)
+            .join('\n') || 'No subagents in this session',
+          1,
+          0,
+        ),
+      )
+      this.#insertTranscript(
+        new Text(
+          '/tasks <id> · /tasks stop <id> · /tasks continue <id> [message] · /tasks send <id> <message>\nSubagent edits are not restored by the parent /rewind.',
+          1,
+          0,
+        ),
+      )
+    } else if (action === 'stop' && id) {
+      const a = await this.#agentCommands.stop(id)
+      this.#insertTranscript(new Text(`Stopped agent ${a.id}`, 1, 0))
+    } else if ((action === 'send' || action === 'continue') && id) {
+      const message = rest.join(' ') || (action === 'continue' ? 'Continue your task.' : '')
+      if (!message) throw new Error('A message is required')
+      await this.#agentCommands.send(id, message)
+      this.#insertTranscript(new Text(`Message sent to ${id}`, 1, 0))
+    } else {
+      const { agent, messages } = await this.#agentCommands.snapshot(action)
+      this.#insertTranscript(new Text(`${agent.id} · ${agent.status} · ${agent.outputFile}`, 1, 0))
+      for (const m of messages) {
+        const text = m.message.content
+          .map((b) =>
+            b.type === 'text'
+              ? b.text
+              : b.type === 'tool_use'
+                ? b.name
+                : b.type === 'tool_result'
+                  ? String(b.content)
+                  : '',
+          )
+          .filter(Boolean)
+          .join('\n')
+        if (text) this.#insertTranscript(new Text(`${m.type}: ${text}`, 1, 0))
+      }
+    }
+    this.#tui.requestRender()
   }
 
   #insertTranscript(component: Markdown | Text): void {
@@ -362,14 +504,22 @@ export class DockTuiApp {
   }
 
   async #requestPermission(request: PermissionRequest): Promise<PermissionApproval> {
-    this.#status.setText(`Permission required · ${request.tool.name}`)
+    return this.#withModal(() => this.#showPermission(request))
+  }
+
+  async #showPermission(request: PermissionRequest): Promise<PermissionApproval> {
+    if (this.#closing || request.signal.aborted) return { behavior: 'deny' }
+    this.#status.setText(
+      `Permission required · ${request.tool.name}` +
+        (request.requester ? ` · ${request.requester.label} [${request.requester.agentId}]` : ''),
+    )
     this.#tui.requestRender()
     return new Promise<PermissionApproval>((resolve) => {
       const list = new SelectList(
         [
           { description: 'Run only this tool call', label: 'Yes', value: 'once' },
           {
-            description: 'Allow the same call until this session controller ends',
+            description: 'Share this call approval within the current session, including subagents',
             label: 'Yes, for this session',
             value: 'session',
           },
@@ -392,6 +542,7 @@ export class DockTuiApp {
       const finish = (approval: PermissionApproval) => {
         if (settled) return
         settled = true
+        this.#cancelModals.delete(onAbort)
         request.signal.removeEventListener('abort', onAbort)
         overlay.hide()
         this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · working`)
@@ -399,6 +550,7 @@ export class DockTuiApp {
         resolve(approval)
       }
       const onAbort = () => finish({ behavior: 'deny' })
+      this.#cancelModals.add(onAbort)
       list.onSelect = (item) => {
         const rule = request.tool.getPermissionRule?.(request.input)
         finish(
@@ -541,22 +693,48 @@ export class DockTuiApp {
       )
     }
     this.#tui.requestRender(true)
+    this.notifyTasksChanged()
+  }
+
+  async #withModal<T>(show: () => Promise<T>): Promise<T> {
+    this.#modal++
+    const next = this.#modalTail.then(show, show)
+    this.#modalTail = next.catch(() => {})
+    try {
+      return await next
+    } finally {
+      this.#modal--
+      this.#flushTasks()
+    }
   }
 
   async #select(
     items: Array<{ description: string; label: string; value: string }>,
   ): Promise<string | undefined> {
-    return new Promise((resolve) => {
-      const list = new SelectList(items, Math.min(items.length, 10), selectListTheme)
-      const overlay = this.#tui.showOverlay(list, { anchor: 'bottom-center', width: '70%' })
-      const finish = (value?: string) => {
-        overlay.hide()
-        this.#tui.requestRender(true)
-        resolve(value)
-      }
-      list.onSelect = (item) => finish(item.value)
-      list.onCancel = () => finish()
-    })
+    return this.#withModal(
+      () =>
+        new Promise((resolve) => {
+          if (this.#closing) {
+            resolve(undefined)
+            return
+          }
+          const list = new SelectList(items, Math.min(items.length, 10), selectListTheme)
+          const overlay = this.#tui.showOverlay(list, { anchor: 'bottom-center', width: '70%' })
+          let settled = false
+          const cancel = () => finish()
+          const finish = (value?: string) => {
+            if (settled) return
+            settled = true
+            this.#cancelModals.delete(cancel)
+            overlay.hide()
+            this.#tui.requestRender(true)
+            resolve(value)
+          }
+          this.#cancelModals.add(cancel)
+          list.onSelect = (item) => finish(item.value)
+          list.onCancel = () => finish()
+        }),
+    )
   }
 }
 

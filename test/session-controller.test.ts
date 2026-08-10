@@ -93,3 +93,56 @@ describe('SessionController', () => {
     expect(turnComplete.drain).toHaveBeenCalledOnce()
   })
 })
+
+it('consumes system notifications without a user checkpoint or memory extraction', async () => {
+  const configDir = await mkdtemp(join(tmpdir(), 'dock-inbox-')),
+    cwd = '/work',
+    sessionId = createSessionId()
+  const writer = await SessionWriter.create({ configDir, cwd, sessionId })
+  const fileHistory = new FileHistory({ configDir, cwd, sessionId })
+  const snapshot = vi.spyOn(fileHistory, 'makeSnapshot')
+  const { createUserMessage } = await import('../src/messages/create-message.js')
+  let pending = [
+    {
+      ...createUserMessage({ content: [{ type: 'text', text: 'child completed' }] }),
+      isMeta: true as const,
+      agentEventKey: 'child:run',
+    },
+  ]
+  const ack = vi.fn(async (ids: readonly string[]) => {
+    pending = pending.filter((m) => !ids.includes(m.uuid))
+  })
+  const model = new FakeModelAdapter([
+    [
+      { type: 'message_start', messageId: 'reply' },
+      { type: 'content_block_start', index: 0, block: { type: 'text' } },
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'acknowledged' },
+      },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', stopReason: 'end_turn', usage: {} },
+      { type: 'message_stop' },
+    ],
+  ])
+  const turnComplete = { drain: vi.fn(async () => {}), schedule: vi.fn() }
+  const controller = new SessionController({
+    fileHistory,
+    writer,
+    model,
+    modelId: 'test',
+    systemPrompt: [],
+    tools: [],
+    turnComplete,
+    inbox: { peek: async () => pending, ack },
+  })
+  for await (const _ of controller.processNotifications()) {
+  }
+  expect(snapshot).not.toHaveBeenCalled()
+  expect(turnComplete.schedule).not.toHaveBeenCalled()
+  expect(ack).toHaveBeenCalled()
+  expect(controller.rewindPoints()).toEqual([])
+  await controller.close()
+  expect((await loadSession({ configDir, cwd, sessionId })).messages).toHaveLength(2)
+})

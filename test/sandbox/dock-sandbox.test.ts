@@ -64,6 +64,32 @@ describe('createSandboxRuntimeConfig', () => {
   })
 })
 
+it('shares initialization but keeps per-command cwd config and drains concurrent commands', async () => {
+  const manager = createManager()
+  const sandbox = new DockSandbox({
+    config: createSandboxRuntimeConfig({ cwd: '/main', homeDir: '/home/u', settings: {} }),
+    manager,
+    settings: { enabled: true },
+  })
+  await sandbox.initialize()
+  const a = sandbox.forCwd('/child-a'),
+    b = sandbox.forCwd('/child-b')
+  await a.wrapCommand('pwd', new AbortController().signal, 'a')
+  await b.wrapCommand('pwd', new AbortController().signal, 'b')
+  expect(manager.initialize).toHaveBeenCalledTimes(1)
+  expect(manager.updateConfig).not.toHaveBeenCalled()
+  const calls = vi.mocked(manager.wrapWithSandbox).mock.calls
+  expect(calls[0]?.[2]?.filesystem?.allowWrite).toContain('/child-a')
+  expect(calls[0]?.[2]?.filesystem?.allowWrite).not.toContain('/child-b')
+  a.cleanupAfterCommand()
+  expect(manager.cleanupAfterCommand).not.toHaveBeenCalled()
+  await sandbox.setMode('off')
+  expect(manager.reset).not.toHaveBeenCalled()
+  b.cleanupAfterCommand()
+  await Promise.resolve()
+  expect(manager.reset).toHaveBeenCalledTimes(1)
+})
+
 describe('DockSandbox', () => {
   it('wraps commands only after successful opt-in initialization', async () => {
     const manager = createManager()

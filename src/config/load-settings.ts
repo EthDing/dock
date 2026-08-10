@@ -61,6 +61,18 @@ const sandboxSettingsSchema = z
 
 const settingsSchema = z
   .object({
+    subagents: z
+      .object({
+        backgroundEnabled: z.boolean().optional(),
+        maxConcurrent: z.number().int().positive().optional(),
+        maxDepth: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    worktree: z
+      .object({ baseRef: z.enum(['fresh', 'head']).optional() })
+      .strict()
+      .optional(),
     contextManagement: z
       .object({
         toolResultClearing: z
@@ -142,6 +154,12 @@ function mergeSettings(base: DockSettings, override: DockSettings): DockSettings
   return {
     ...base,
     ...override,
+    ...(base.subagents || override.subagents
+      ? { subagents: { ...base.subagents, ...override.subagents } }
+      : {}),
+    ...(base.worktree || override.worktree
+      ? { worktree: { ...base.worktree, ...override.worktree } }
+      : {}),
     ...(permissions ? { permissions } : {}),
     ...(providers ? { providers } : {}),
     ...(sandbox ? { sandbox } : {}),

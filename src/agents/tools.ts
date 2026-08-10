@@ -88,7 +88,7 @@ export function createAgentTools(manager: SubagentManager): AgentTool[] {
         await manager.send(parent.sessionId, parsed.to, parsed.message, {
           fromAgentId: parent.agentId,
         })
-        return { content: 'Message queued for ' + parsed.to }
+        return { content: `Message queued for ${parsed.to}` }
       },
     },
     {

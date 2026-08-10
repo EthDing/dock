@@ -1,5 +1,5 @@
 import { createHash, type UUID } from 'node:crypto'
-import { type FileHandle, mkdir, open, readFile, unlink } from 'node:fs/promises'
+import { type FileHandle, mkdir, open, readFile, unlink, rmdir } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import type { FileHistorySnapshot } from '../checkpoint/file-history.js'
 import type { CompactionResult } from '../context/compaction.js'
@@ -424,19 +424,50 @@ export function encodeProjectPath(cwd: string): string {
   return `${encoded.slice(0, 183)}-${hash}`
 }
 
-async function acquireLock(sessionPath: string): Promise<{ handle: FileHandle; path: string }> {
+async function acquireLock(
+  sessionPath: string,
+  recovered = false,
+): Promise<{ handle: FileHandle; path: string }> {
   const lockPath = `${sessionPath}.lock`
+  let handle: FileHandle
   try {
-    const handle = await open(lockPath, 'wx', 0o600)
+    handle = await open(lockPath, 'wx', 0o600)
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== 'EEXIST') throw error
+    if (recovered) throw new Error(`Session ${sessionPath} is already open`)
+    const guard = `${lockPath}.recovery`
+    try {
+      await mkdir(guard)
+    } catch {
+      throw new Error(`Session ${sessionPath} is already open`)
+    }
+    try {
+      // Recover only an unequivocally dead owner. Unknown or live PIDs retain the lock.
+      const owner = JSON.parse(await readFile(lockPath, 'utf8')) as { pid?: number }
+      if (!Number.isSafeInteger(owner.pid) || !owner.pid || owner.pid <= 0)
+        throw new Error('Invalid session lock owner')
+      let dead = false
+      try {
+        process.kill(owner.pid, 0)
+      } catch (error) {
+        dead = isNodeError(error) && error.code === 'ESRCH'
+      }
+      if (!dead) throw new Error(`Session ${sessionPath} is already open`)
+      await unlink(lockPath)
+      return await acquireLock(sessionPath, true)
+    } finally {
+      await rmdir(guard)
+    }
+  }
+  try {
     await handle.writeFile(
       `${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`,
     )
     await handle.sync()
     return { handle, path: lockPath }
   } catch (error) {
-    if (isNodeError(error) && error.code === 'EEXIST') {
-      throw new Error(`Session ${sessionPath} is already open`)
-    }
+    await handle.close()
+    await unlink(lockPath)
     throw error
   }
 }

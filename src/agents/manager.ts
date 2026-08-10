@@ -1,4 +1,5 @@
 import { randomUUID, type UUID } from 'node:crypto'
+import { resolve } from 'node:path'
 import { runAgentLoop, type AgentLoopResult } from '../agent/run-agent-loop.js'
 import type { ContextManager } from '../context/context-manager.js'
 import {
@@ -26,6 +27,7 @@ export type SubagentRuntime = {
   maxOutputTokens?: number | undefined
 }
 type Actor = {
+  preparing?: Promise<void> | undefined
   resumeRequested?: boolean | undefined
   meta: AgentMetadata
   messages: readonly TranscriptMessage[]
@@ -60,6 +62,14 @@ export class SubagentManager {
   setWakeHandler(handler: (sessionId: SessionId) => void): void {
     this.#wake = handler
   }
+
+  isOutputPath(sessionId: SessionId, path: string): boolean {
+    return [...this.#actors.values()].some(
+      (actor) =>
+        actor.meta.sessionId === sessionId &&
+        resolve(path) === resolve(this.#store.transcriptPath(actor.meta)),
+    )
+  }
   #root(sessionId: SessionId): Promise<AgentIndex> {
     let pending = this.#roots.get(sessionId)
     if (!pending) {
@@ -84,6 +94,11 @@ export class SubagentManager {
   }
   async loadSession(sessionId: SessionId): Promise<void> {
     await this.#root(sessionId)
+    for (const actor of this.#actors.values()) {
+      if (actor.meta.sessionId !== sessionId || actor.running) continue
+      if (actor.meta.background && actor.meta.notifiedRunId !== actor.meta.runId)
+        await this.#notify(actor, false)
+    }
   }
   async list(sessionId: SessionId): Promise<AgentView[]> {
     await this.#root(sessionId)
@@ -148,7 +163,11 @@ export class SubagentManager {
       createdAt: now,
       updatedAt: now,
     }
-    const actor: Actor = { meta, messages: [], parentSnapshot: parent }
+    let finishPreparation!: () => void
+    const preparing = new Promise<void>((resolve) => {
+      finishPreparation = resolve
+    })
+    const actor: Actor = { meta, messages: [], parentSnapshot: parent, preparing }
     this.#actors.set(id, actor)
     try {
       const index = await this.#root(parent.sessionId)
@@ -185,12 +204,27 @@ export class SubagentManager {
         options.signal.addEventListener('abort', abort, { once: true })
         actor.detachParent = () => options.signal?.removeEventListener('abort', abort)
       }
+      if (this.#closed) {
+        meta.status = 'stopped'
+        meta.stoppedBy = 'shutdown'
+        if (meta.worktree) {
+          try {
+            meta.worktreeRemoved = (await this.#worktrees.finish(meta.worktree)) === 'removed'
+          } catch (error) {
+            meta.error = `Worktree retained: ${errorMessage(error)}`
+          }
+        }
+        await this.#save(actor)
+        return this.#view(actor)
+      }
       let backgrounded: Promise<void> | undefined
       if (!meta.background)
         backgrounded = new Promise((resolve) => {
           actor.backgrounded = resolve
         })
       this.#launch(actor)
+      actor.preparing = undefined
+      finishPreparation()
       if (options.signal?.aborted && !meta.background) actor.abort?.abort('parent interrupted')
       if (backgrounded) await Promise.race([actor.running, backgrounded])
       return this.#view(actor)
@@ -199,6 +233,9 @@ export class SubagentManager {
       meta.error = errorMessage(error)
       await this.#save(actor).catch(() => {})
       throw error
+    } finally {
+      actor.preparing = undefined
+      finishPreparation()
     }
   }
   async wait(id: string): Promise<AgentView> {
@@ -316,7 +353,12 @@ export class SubagentManager {
         actor.meta.stoppedBy = 'shutdown'
         actor.abort?.abort('shutdown')
       }
-    await Promise.all([...this.#actors.values()].map((actor) => actor.running))
+    await Promise.all(
+      [...this.#actors.values()].map(async (actor) => {
+        await actor.preparing
+        await actor.running
+      }),
+    )
   }
   #view(actor: Actor): AgentView {
     const m = actor.meta
@@ -340,7 +382,6 @@ export class SubagentManager {
   async #save(actor: Actor): Promise<void> {
     actor.meta.updatedAt = new Date().toISOString()
     await this.#store.save(actor.meta)
-    this.#wake?.(actor.meta.sessionId)
   }
   async #resolve(sessionId: SessionId, to: string, fromAgentId?: UUID): Promise<Actor> {
     const index = await this.#root(sessionId)
@@ -428,6 +469,23 @@ export class SubagentManager {
         const loaded = await loadSession(location)
         actor.messages = loaded.messages
         writer = await SessionWriter.open(location)
+      }
+      const tail = actor.messages.at(-1)
+      if (tail?.type === 'assistant') {
+        const calls = tail.message.content.filter((block) => block.type === 'tool_use')
+        if (calls.length) {
+          const interrupted = createUserMessage({
+            content: calls.map((call) => ({
+              type: 'tool_result' as const,
+              toolUseId: call.id,
+              isError: true,
+              content:
+                'Previous execution was interrupted before a result was recorded. No outcome is known; verify before retrying.',
+            })),
+          })
+          await writer.recordTranscript([interrupted])
+          actor.messages = [...actor.messages, interrupted]
+        }
       }
       const known = new Set(actor.messages.map((message) => message.uuid))
       meta.pending = meta.pending.filter((message) => !known.has(message.uuid))
@@ -558,14 +616,14 @@ export class SubagentManager {
     await this.#store.saveIndex(sessionId, index)
     this.#wake?.(sessionId)
   }
-  async #notify(actor: Actor): Promise<void> {
+  async #notify(actor: Actor, resumeParent = true): Promise<void> {
     const meta = actor.meta
     if (meta.notifiedRunId === meta.runId) return
     const details = [
-      meta.error ? 'Error: ' + meta.error : '',
+      meta.error ? `Error: ${meta.error}` : '',
       meta.report ?? '',
       meta.worktree && !meta.worktreeRemoved
-        ? 'Worktree: ' + meta.worktree.path + '\nBranch: ' + meta.worktree.branch
+        ? `Worktree: ${meta.worktree.path}\nBranch: ${meta.worktree.branch}`
         : '',
     ]
       .filter(Boolean)
@@ -586,13 +644,15 @@ export class SubagentManager {
     }
     const parent = meta.parentAgentId ? this.#actors.get(meta.parentAgentId) : undefined
     if (parent) {
+      if (!parent.messages.length)
+        parent.messages = (await loadSession(this.#store.location(parent.meta))).messages
       if (
         !parent.meta.pending.some((m) => m.agentEventKey === message.agentEventKey) &&
         !parent.messages.some((m) => m.type === 'user' && m.agentEventKey === message.agentEventKey)
       )
         parent.meta.pending.push(message)
       await this.#save(parent)
-      if (!parent.running && parent.meta.stoppedBy !== 'user' && !this.#closed) {
+      if (resumeParent && !parent.running && parent.meta.stoppedBy !== 'user' && !this.#closed) {
         parent.meta.background = true
         this.#launch(parent)
       }

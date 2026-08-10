@@ -97,21 +97,23 @@ export class AgentWorktrees {
     await mkdir(dirname(exclude), { recursive: true })
     const previous = await readFile(exclude, 'utf8').catch(() => '')
     if (!previous.split('\n').includes('/.dock/worktrees/'))
-      await writeFile(exclude, previous + '\n/.dock/worktrees/\n')
+      await writeFile(exclude, `${previous}\n/.dock/worktrees/\n`)
     const config = await git(parentCwd, [
       'config',
       '--local',
+      '--name-only',
+      '--null',
       '--get-regexp',
       '^(filter\\.|includeIf\\.)',
     ]).catch((error) => {
       if (error && typeof error === 'object' && 'code' in error && error.code === 1) return ''
       throw new Error('Cannot inspect repository filters before creating worktree')
     })
-    if (/^includeif\./im.test(config))
+    if (config.split('\0').some((key) => /^includeif\./i.test(key)))
       throw new Error('Cannot safely create worktree with repository-local includeIf')
     const filters = new Set(
-      config.split('\n').flatMap((line) => {
-        const match = line.match(/^filter\.(.+)\.(?:smudge|clean|process|required)\s/)
+      config.split('\0').flatMap((line) => {
+        const match = line.match(/^filter\.(.+)\.(?:smudge|clean|process|required)$/s)
         return match?.[1] ? [match[1]] : []
       }),
     )
@@ -182,9 +184,12 @@ export class AgentWorktrees {
   }
   async finish(handle: AgentWorktree): Promise<'removed' | 'retained'> {
     await this.validate(handle)
-    const status = await git(handle.path, ['status', '--porcelain', '--untracked-files=all']).catch(
-      () => 'unknown',
-    )
+    const status = await git(handle.path, [
+      'status',
+      '--porcelain',
+      '--untracked-files=all',
+      '--ignored=matching',
+    ]).catch(() => 'unknown')
     const head = await git(handle.path, ['rev-parse', 'HEAD']).catch(() => '')
     const branch = await git(handle.path, ['symbolic-ref', '--short', 'HEAD']).catch(() => '')
     const locked = await readFile(join(handle.gitDir, 'locked'), 'utf8').catch(() => '')
@@ -194,7 +199,12 @@ export class AgentWorktrees {
     if (status || head !== handle.baseCommit || branch !== handle.branch) return 'retained'
     // Only the validated, unchanged checkout and its UUID-named branch are removed.
     await git(handle.gitRoot, ['worktree', 'remove', handle.path])
-    await git(handle.gitRoot, ['branch', '-D', handle.branch])
+    await git(handle.gitRoot, [
+      'update-ref',
+      '-d',
+      `refs/heads/${handle.branch}`,
+      handle.baseCommit,
+    ])
     return 'removed'
   }
 }

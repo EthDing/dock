@@ -1,3 +1,4 @@
+import type { BashSandboxRuntime } from '../tools/bash-tool.js'
 import { join, resolve } from 'node:path'
 import {
   SandboxManager,
@@ -45,6 +46,10 @@ export class DockSandbox {
   readonly #settings: SandboxSettings
   #askCallback: SandboxAskCallback | undefined
   #enabled = false
+  #initialized = false
+  #activeCommands = 0
+  #pendingReset = false
+  #resetting: Promise<void> | undefined
   #unavailableReason: string | undefined
 
   constructor(options: {
@@ -77,6 +82,12 @@ export class DockSandbox {
   async initialize(callback?: SandboxAskCallback): Promise<void> {
     if (callback) this.#askCallback = callback
     if (!this.#settings.enabled) return
+    await this.#resetting
+    if (this.#initialized) {
+      this.#pendingReset = false
+      this.#enabled = true
+      return
+    }
     this.#unavailableReason = undefined
     const unavailableReason = this.#getUnavailableReason()
     if (unavailableReason) {
@@ -86,6 +97,7 @@ export class DockSandbox {
     }
     try {
       await this.#manager.initialize(this.#config, this.#askCallback)
+      this.#initialized = true
       this.#enabled = true
       this.#unavailableReason = undefined
     } catch (error) {
@@ -119,15 +131,48 @@ export class DockSandbox {
     )
   }
 
-  async wrapCommand(command: string, signal: AbortSignal, commandId: string): Promise<string> {
+  forCwd(cwd: string): BashSandboxRuntime {
+    return {
+      shouldUseSandbox: (input) => this.shouldUseSandbox(input),
+      wrapCommand: (command, signal, id) => this.wrapCommand(command, signal, id, cwd),
+      annotateFailure: (command, stderr) => this.annotateFailure(command, stderr),
+      cleanupAfterCommand: () => this.cleanupAfterCommand(),
+    }
+  }
+
+  async wrapCommand(
+    command: string,
+    signal: AbortSignal,
+    commandId: string,
+    cwd?: string,
+  ): Promise<string> {
     if (!this.#enabled) return command
     // Tool permissions decide whether Bash may run; sandbox-runtime separately
     // constrains the process after that decision. Neither layer substitutes for
     // explicit deny rules or the other's enforcement boundary.
-    return this.#manager.wrapWithSandbox(command, '/bin/bash', undefined, signal, {
-      commandId,
-      commandText: command,
-    })
+    this.#activeCommands++
+    const customConfig = cwd
+      ? {
+          filesystem: {
+            ...this.#config.filesystem,
+            allowWrite: unique([...this.#config.filesystem.allowWrite, resolve(cwd)]),
+            denyWrite: unique([
+              ...this.#config.filesystem.denyWrite,
+              join(cwd, '.dock', 'settings.json'),
+              join(cwd, '.dock', 'settings.local.json'),
+            ]),
+          },
+        }
+      : undefined
+    try {
+      return await this.#manager.wrapWithSandbox(command, '/bin/bash', customConfig, signal, {
+        commandId,
+        commandText: command,
+      })
+    } catch (error) {
+      this.cleanupAfterCommand()
+      throw error
+    }
   }
 
   annotateFailure(command: string, stderr: string): string {
@@ -135,7 +180,14 @@ export class DockSandbox {
   }
 
   cleanupAfterCommand(): void {
-    if (this.#enabled) this.#manager.cleanupAfterCommand()
+    this.#activeCommands = Math.max(0, this.#activeCommands - 1)
+    if (this.#activeCommands !== 0 || !this.#initialized) return
+    // Helpers are process-wide; one child's completion must not tear down another.
+    this.#manager.cleanupAfterCommand()
+    if (this.#pendingReset)
+      void this.reset().catch((error) => {
+        this.#unavailableReason = String(error)
+      })
   }
 
   updateConfig(config: SandboxRuntimeConfig): void {
@@ -144,9 +196,16 @@ export class DockSandbox {
   }
 
   async reset(): Promise<void> {
-    if (!this.#enabled) return
     this.#enabled = false
-    await this.#manager.reset()
+    if (!this.#initialized) return this.#resetting
+    if (this.#activeCommands > 0) {
+      this.#pendingReset = true
+      return
+    }
+    this.#pendingReset = false
+    this.#initialized = false
+    this.#resetting = this.#manager.reset()
+    await this.#resetting
   }
 
   #getUnavailableReason(): string | undefined {

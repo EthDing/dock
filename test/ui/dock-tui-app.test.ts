@@ -1,5 +1,5 @@
 import { type Terminal, TuiMainScreen } from '@dock/tui'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { MemoryNotificationBroker } from '../../src/memory/memory-notification-broker.js'
 import { PermissionBroker } from '../../src/permissions/permission-broker.js'
 import type { DockSandboxMode } from '../../src/sandbox/dock-sandbox.js'
@@ -65,7 +65,9 @@ describe('DockTuiApp', () => {
       { behavior: 'ask', source: 'fallback' },
       abortController.signal,
     )
-    await Promise.resolve()
+    await vi.waitFor(() =>
+      expect(tui.render(80).join('\n')).toContain('Permission required · Write'),
+    )
     terminal.send('\u001b[B')
     terminal.send('\u001b[B')
     terminal.send('\r')
@@ -82,7 +84,9 @@ describe('DockTuiApp', () => {
       { behavior: 'ask', source: 'fallback' },
       abortController.signal,
     )
-    await Promise.resolve()
+    await vi.waitFor(() =>
+      expect(tui.render(80).join('\n')).toContain('Permission required · Bash'),
+    )
     terminal.send('\u001b[B')
     terminal.send('\u001b[B')
     terminal.send('\r')
@@ -343,4 +347,61 @@ describe('DockTuiApp', () => {
     expect(rendered).not.toContain('Conversation compacted')
     await app.stop()
   })
+})
+it('labels child permission prompts and Escape denies only that call, not the main turn', async () => {
+  let release!: () => void
+  const gate = new Promise<void>((r) => {
+      release = r
+    }),
+    abort = vi.fn()
+  const controller: DockUiController = {
+    abort,
+    close: async () => {},
+    async *submit() {
+      await gate
+      yield* []
+    },
+  }
+  const broker = new PermissionBroker(),
+    terminal = new MemoryTerminal(),
+    tui = new TuiMainScreen(terminal)
+  const app = new DockTuiApp({ controller, permissionBroker: broker, tui })
+  app.start()
+  const main = app.submit('working')
+  const approval = broker.requestApproval(
+    {
+      name: 'Write',
+      description: 'write',
+      inputSchema: {},
+      isConcurrencySafe: () => false,
+      execute: async () => ({ content: '' }),
+    },
+    {},
+    { behavior: 'ask', source: 'fallback' },
+    new AbortController().signal,
+    { agentId: 'stable-child-id', label: 'Child task' },
+  )
+  await vi.waitFor(() => expect(tui.render(80).join('\n')).toContain('Child task'))
+  terminal.send('\u001b')
+  expect(await approval).toEqual({ behavior: 'deny' })
+  expect(abort).not.toHaveBeenCalled()
+  release()
+  await main
+  await app.stop()
+})
+
+it('closes an outstanding network permission dialog during shutdown', async () => {
+  const controller: DockUiController = {
+    abort: () => {},
+    close: async () => {},
+    async *submit() {},
+  }
+  const broker = new SandboxNetworkPermissionBroker(),
+    tui = new TuiMainScreen(new MemoryTerminal())
+  const app = new DockTuiApp({ controller, sandboxNetworkPermissionBroker: broker, tui })
+  app.start()
+  const pending = broker.request({ host: 'example.invalid', port: 443 })
+  await Promise.resolve()
+  await app.stop()
+  expect(await pending).toEqual({ allow: false, persist: false })
 })

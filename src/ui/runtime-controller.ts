@@ -1,3 +1,4 @@
+import type { AgentSnapshot } from '../agents/types.js'
 import type { UUID } from 'node:crypto'
 import type { AgentEvent } from '../agent/run-agent-loop.js'
 import type { TranscriptMessage } from '../messages/create-message.js'
@@ -19,7 +20,8 @@ export type RuntimeSession = Required<
     | 'setPermissionMode'
     | 'submit'
   >
->
+> &
+  Pick<DockUiController, 'getSnapshot' | 'processNotifications'>
 
 export class RuntimeController implements DockUiController {
   #controller: RuntimeSession
@@ -42,6 +44,14 @@ export class RuntimeController implements DockUiController {
 
   async *submit(text: string): AsyncIterable<AgentEvent> {
     yield* this.#controller.submit(text)
+  }
+
+  getSnapshot(): AgentSnapshot {
+    if (!this.#controller.getSnapshot) throw new Error('Agent identity unavailable')
+    return this.#controller.getSnapshot()
+  }
+  async *processNotifications(): AsyncIterable<AgentEvent> {
+    if (this.#controller.processNotifications) yield* this.#controller.processNotifications()
   }
 
   async close(): Promise<void> {

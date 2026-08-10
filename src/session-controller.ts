@@ -1,3 +1,5 @@
+import type { AgentSnapshot } from './agents/types.js'
+import type { UserTranscriptMessage } from './messages/create-message.js'
 import type { UUID } from 'node:crypto'
 import { buildModelRequest } from './agent/request.js'
 import { type AgentEvent, type AgentLoopResult, runAgentLoop } from './agent/run-agent-loop.js'
@@ -11,6 +13,15 @@ import type { SessionWriter } from './sessions/session-store.js'
 import type { AgentTool, CanUseTool } from './tools/types.js'
 
 export class SessionController {
+  readonly #identity:
+    | (() => Omit<AgentSnapshot, 'messages' | 'systemPrompt' | 'userContext' | 'tools'>)
+    | undefined
+  readonly #inbox:
+    | {
+        peek: (seen: readonly TranscriptMessage[]) => Promise<readonly UserTranscriptMessage[]>
+        ack: (ids: readonly string[]) => Promise<void>
+      }
+    | undefined
   readonly #fileHistory: FileHistory
   readonly #model: ModelAdapter
   readonly #modelId: string
@@ -30,6 +41,14 @@ export class SessionController {
   #finishActive: (() => void) | undefined
 
   constructor(options: {
+    getAgentIdentity?: () => Omit<
+      AgentSnapshot,
+      'messages' | 'systemPrompt' | 'userContext' | 'tools'
+    >
+    inbox?: {
+      peek: (seen: readonly TranscriptMessage[]) => Promise<readonly UserTranscriptMessage[]>
+      ack: (ids: readonly string[]) => Promise<void>
+    }
     canUseTool?: CanUseTool
     contextManager?: ContextManager
     fileHistory: FileHistory
@@ -44,6 +63,8 @@ export class SessionController {
     userContext?: Readonly<Record<string, string>>
     writer: SessionWriter
   }) {
+    this.#identity = options.getAgentIdentity
+    this.#inbox = options.inbox
     this.#canUseTool = options.canUseTool
     this.#contextManager = options.contextManager
     this.#fileHistory = options.fileHistory
@@ -63,17 +84,52 @@ export class SessionController {
     return this.#messages
   }
 
+  getSnapshot(): AgentSnapshot {
+    if (!this.#identity) throw new Error('Agent identity is unavailable')
+    return {
+      ...this.#identity(),
+      messages: [...this.#messages],
+      systemPrompt: this.#systemPrompt,
+      userContext: this.#userContext,
+      tools: this.#tools.map(({ name, description, inputSchema }) => ({
+        name,
+        description,
+        inputSchema,
+      })),
+      maxOutputTokens: this.#maxOutputTokens,
+    }
+  }
+
+  async *processNotifications(): AsyncGenerator<AgentEvent, AgentLoopResult> {
+    if (!(await this.#inbox?.peek(this.#messages))?.length)
+      return { reason: 'completed', messages: this.#messages }
+    return yield* this.#run()
+  }
+
   async *submit(text: string): AsyncGenerator<AgentEvent, AgentLoopResult> {
+    return yield* this.#run(text)
+  }
+
+  async *#run(text?: string): AsyncGenerator<AgentEvent, AgentLoopResult> {
     const abortController = this.#beginOperation()
     let generator: ReturnType<typeof runAgentLoop> | undefined
     try {
-      const userMessage = createUserMessage({ content: [{ text, type: 'text' }] })
-      await this.#fileHistory.makeSnapshot(userMessage.uuid)
-      this.#messages.push(userMessage)
-      await this.#writer.recordTranscript([userMessage])
+      if (text !== undefined) {
+        const userMessage = createUserMessage({ content: [{ text, type: 'text' }] })
+        await this.#fileHistory.makeSnapshot(userMessage.uuid)
+        this.#messages.push(userMessage)
+        await this.#writer.recordTranscript([userMessage])
+      }
       generator = runAgentLoop({
         ...(this.#canUseTool ? { canUseTool: this.#canUseTool } : {}),
         ...(this.#contextManager ? { contextManager: this.#contextManager } : {}),
+        ...(this.#identity ? { getAgentIdentity: this.#identity } : {}),
+        ...(this.#inbox
+          ? {
+              getPendingMessages: (seen: readonly TranscriptMessage[]) =>
+                this.#inbox?.peek(seen) ?? Promise.resolve([]),
+            }
+          : {}),
         messages: this.#messages,
         ...(this.#maxOutputTokens ? { maxOutputTokens: this.#maxOutputTokens } : {}),
         model: this.#model,
@@ -89,6 +145,10 @@ export class SessionController {
         const event = next.value
         if (event.type === 'assistant_message' || event.type === 'user_message') {
           await this.#writer.recordTranscript([event.message])
+          if (!this.#messages.some((m) => m.uuid === event.message.uuid))
+            this.#messages.push(event.message)
+          if (event.type === 'user_message' && event.message.agentEventKey)
+            await this.#inbox?.ack([event.message.uuid])
         } else if (event.type === 'compact') {
           await this.#writer.recordCompaction(event.messages, event.compaction)
           this.#messages = [...event.messages]
@@ -104,7 +164,7 @@ export class SessionController {
       }
       this.#messages = [...next.value.messages]
       await this.#writer.recordTranscript(this.#messages)
-      if (next.value.reason === 'completed')
+      if (text !== undefined && next.value.reason === 'completed')
         this.#turnComplete?.schedule(this.#messages, this.#userContext)
       return next.value
     } finally {
@@ -177,7 +237,13 @@ export class SessionController {
 
   rewindPoints(): Array<{ label: string; uuid: UUID }> {
     return this.#messages
-      .filter((message) => message.type === 'user' && !message.isCompactSummary)
+      .filter(
+        (message) =>
+          message.type === 'user' &&
+          !message.isCompactSummary &&
+          !message.isMeta &&
+          message.message.content.some((b) => b.type === 'text'),
+      )
       .map((message) => ({
         label:
           message.message.content

@@ -32,10 +32,10 @@ function parent(): AgentSnapshot {
 }
 async function setup(
   model: ModelAdapter,
-  options: { backgroundEnabled?: boolean; maxConcurrent?: number } = {},
+  options: { backgroundEnabled?: boolean; maxConcurrent?: number; configDir?: string } = {},
 ) {
   return new SubagentManager({
-    configDir: await mkdtemp(join(tmpdir(), 'dock-agents-')),
+    configDir: options.configDir ?? (await mkdtemp(join(tmpdir(), 'dock-agents-'))),
     projectCwd: '/work',
     ...options,
     createRuntime: async () => ({
@@ -224,4 +224,199 @@ describe('subagent lifecycle', () => {
     expect(result.report ?? '').not.toContain('PARENT RESULT')
     await manager.close()
   })
+})
+it('restarts into recoverable stopped state and retains the same transcript and ID', async () => {
+  const configDir = await mkdtemp(join(tmpdir(), 'dock-agent-restart-'))
+  let started = false
+  const first = await setup(
+    {
+      async *stream(_request, { signal }) {
+        started = true
+        await new Promise<void>((_, reject) =>
+          signal.addEventListener('abort', () => reject(Error('shutdown')), { once: true }),
+        )
+        yield* response('unreachable')
+      },
+    },
+    { configDir },
+  )
+  const p = parent(),
+    agent = await first.spawn(p, { prompt: 'remember original task', description: 'Task' })
+  await until(() => started)
+  await first.close()
+  const requests: ModelRequest[] = []
+  const second = await setup(
+    {
+      async *stream(r) {
+        requests.push(r)
+        yield* response('resumed result')
+      },
+    },
+    { configDir },
+  )
+  expect((await second.list(p.sessionId))[0]).toMatchObject({
+    id: agent.id,
+    status: 'stopped',
+    stoppedBy: 'shutdown',
+  })
+  await second.send(p.sessionId, agent.id, 'continue')
+  expect((await second.wait(agent.id)).status).toBe('completed')
+  expect(JSON.stringify(requests[0])).toContain('remember original task')
+  const events = await second.pendingNotifications(p.sessionId)
+  await second.ackNotifications(
+    p.sessionId,
+    events.map((m) => m.uuid),
+  )
+  await second.close()
+  const third = await setup(
+    {
+      async *stream() {
+        yield* response('not called')
+      },
+    },
+    { configDir },
+  )
+  expect(await third.pendingNotifications(p.sessionId)).toEqual([])
+  await third.close()
+})
+
+it('rebinds live tasks on clear while keeping their output location and excluding other sessions', async () => {
+  let release!: () => void,
+    started = false
+  const gate = new Promise<void>((r) => {
+    release = r
+  })
+  const manager = await setup({
+    async *stream() {
+      started = true
+      await gate
+      yield* response('done')
+    },
+  })
+  const p = parent(),
+    agent = await manager.spawn(p, { prompt: 'task', description: 'Task' })
+  await until(() => started)
+  const next = createSessionId()
+  await manager.retargetAfterClear(p.sessionId, next)
+  release()
+  await manager.wait(agent.id)
+  expect(await manager.list(p.sessionId)).toEqual([])
+  expect((await manager.list(next))[0]?.outputFile).toBe(agent.outputFile)
+  expect(await manager.pendingNotifications(p.sessionId)).toEqual([])
+  expect(await manager.pendingNotifications(next)).toHaveLength(1)
+  await expect(manager.send(p.sessionId, agent.id, 'wrong session')).rejects.toThrow(
+    'in this session',
+  )
+  await manager.close()
+})
+
+it('recovers a completed notification whose final enqueue was interrupted', async () => {
+  const { readFile, writeFile } = await import('node:fs/promises')
+  const configDir = await mkdtemp(join(tmpdir(), 'dock-agent-notify-restart-'))
+  const first = await setup(
+    {
+      async *stream() {
+        yield* response('done')
+      },
+    },
+    { configDir },
+  )
+  const p = parent(),
+    agent = await first.spawn(p, { prompt: 'task', description: 'Task' })
+  await first.wait(agent.id)
+  await first.close()
+  const metaPath = agent.outputFile.replace(/\.jsonl$/, '.json')
+  const meta = JSON.parse(await readFile(metaPath, 'utf8'))
+  delete meta.notifiedRunId
+  await writeFile(metaPath, JSON.stringify(meta))
+  const indexPath = join(agent.outputFile, '..', 'index.json')
+  const index = JSON.parse(await readFile(indexPath, 'utf8'))
+  index.pending = []
+  await writeFile(indexPath, JSON.stringify(index))
+  const second = await setup(
+    {
+      async *stream() {
+        yield* response('never')
+      },
+    },
+    { configDir },
+  )
+  await second.loadSession(p.sessionId)
+  expect(await second.pendingNotifications(p.sessionId)).toHaveLength(1)
+  await second.close()
+})
+it('repairs only a crash-interrupted tool batch before resuming the model', async () => {
+  const { readFile, writeFile } = await import('node:fs/promises')
+  const { SessionWriter } = await import('../../src/sessions/session-store.js')
+  const { createAssistantMessage } = await import('../../src/messages/create-message.js')
+  const configDir = await mkdtemp(join(tmpdir(), 'dock-agent-batch-recovery-'))
+  const first = await setup(
+    {
+      async *stream() {
+        yield* response('done')
+      },
+    },
+    { configDir },
+  )
+  const p = parent(),
+    agent = await first.spawn(p, { prompt: 'task', description: 'Task' })
+  await first.wait(agent.id)
+  await first.close()
+  const writer = await SessionWriter.open({
+    configDir,
+    cwd: '/work',
+    sessionId: p.sessionId,
+    agentId: agent.id,
+  })
+  await writer.recordTranscript([
+    createAssistantMessage({
+      role: 'assistant',
+      id: 'crashed',
+      content: [
+        { type: 'tool_use', name: 'Read', id: 'interrupted-read', input: { file_path: '/work/x' } },
+      ],
+      stopReason: 'tool_use',
+      usage: {},
+    }),
+  ])
+  await writer.close()
+  const path = agent.outputFile.replace(/\.jsonl$/, '.json'),
+    meta = JSON.parse(await readFile(path, 'utf8'))
+  meta.status = 'running'
+  await writeFile(path, JSON.stringify(meta))
+  const requests: ModelRequest[] = []
+  const second = await setup(
+    {
+      async *stream(request) {
+        requests.push(request)
+        yield* response('recovered')
+      },
+    },
+    { configDir },
+  )
+  await second.loadSession(p.sessionId)
+  await second.send(p.sessionId, agent.id, 'continue')
+  await second.wait(agent.id)
+  const blocks =
+    requests[0]?.messages.filter((m) => m.role === 'user').flatMap((m) => m.content) ?? []
+  expect(
+    blocks.filter((b) => b.type === 'tool_result' && b.toolUseId === 'interrupted-read'),
+  ).toHaveLength(1)
+  expect(JSON.stringify(blocks)).toContain('interrupted')
+  await second.close()
+})
+it('drains a task still being registered when shutdown starts', async () => {
+  let calls = 0
+  const manager = await setup({
+    async *stream() {
+      calls++
+      yield* response('done')
+    },
+  })
+  const p = parent(),
+    pending = manager.spawn(p, { prompt: 'task', description: 'Task' })
+  await manager.close()
+  const agent = await pending
+  expect(agent.status).toBe('stopped')
+  expect(calls).toBe(0)
 })

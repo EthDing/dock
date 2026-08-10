@@ -1,3 +1,8 @@
+import { SubagentManager } from './agents/manager.js'
+import { createSubagentRuntime, type AgentPolicy } from './agents/runtime.js'
+import { createAgentTools } from './agents/tools.js'
+import type { AgentTool, CanUseTool } from './tools/types.js'
+import type { UUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { ProcessTerminal, type Terminal, TuiMainScreen } from '@dock/tui'
@@ -44,7 +49,7 @@ import { SandboxNetworkPermissionBroker } from './sandbox/network-permission-bro
 import { SessionController } from './session-controller.js'
 import { asSessionId, createSessionId, type SessionId } from './sessions/ids.js'
 import { findMostRecentSession, forkSession, listSessions } from './sessions/session-manager.js'
-import { loadSession, SessionWriter } from './sessions/session-store.js'
+import { getSessionPath, loadSession, SessionWriter } from './sessions/session-store.js'
 import { createBashTool } from './tools/bash-tool.js'
 import { FileReadState } from './tools/file-read-state.js'
 import { createEditTool, createReadTool, createWriteTool } from './tools/file-tools.js'
@@ -191,11 +196,12 @@ export async function startDock(options: StartDockOptions): Promise<void> {
   }
 
   sessionId ??= createSessionId()
-  const loadUserContext = async (): Promise<Record<string, string>> => {
+  const loadUserContext = async (contextCwd = cwd): Promise<Record<string, string>> => {
     const instructionDocuments = await loadInstructionDocuments({
-      cwd,
+      cwd: contextCwd,
       homeDir,
-      projectRoot: loadedSettings.projectRoot,
+      projectRoot:
+        contextCwd === cwd ? loadedSettings.projectRoot : await findProjectRoot(contextCwd),
     })
     const instructionContext = instructionDocuments
       .map((document) => `Contents of ${document.path}:\n\n${document.content}`)
@@ -214,19 +220,83 @@ export async function startDock(options: StartDockOptions): Promise<void> {
   const permissionMode =
     cli.permissionMode ?? loadedSettings.settings.permissions?.defaultMode ?? 'default'
   const permissionModeState = new PermissionModeState(permissionMode)
+  const policies = new Map<SessionId, AgentPolicy>()
+  const policyFor = (id: SessionId): AgentPolicy => {
+    let policy = policies.get(id)
+    if (!policy) {
+      policy = {
+        rules: {
+          allow: loadedSettings.settings.permissions?.allow ?? [],
+          ask: loadedSettings.settings.permissions?.ask ?? [],
+          deny: loadedSettings.settings.permissions?.deny ?? [],
+        },
+        sessionPermissions: new SessionPermissionState(),
+      }
+      policies.set(id, policy)
+    }
+    return policy
+  }
+  const persistApproval = async (rule: string) => {
+    await addLocalPermissionRule({
+      behavior: 'allow',
+      projectRoot: loadedSettings.projectRoot,
+      rule,
+    })
+    loadedSettings = await loadSettings({ cwd, homeDir })
+    for (const policy of policies.values()) {
+      policy.rules.allow = loadedSettings.settings.permissions?.allow ?? []
+      policy.rules.ask = loadedSettings.settings.permissions?.ask ?? []
+      policy.rules.deny = loadedSettings.settings.permissions?.deny ?? []
+    }
+  }
+  const resolveModel = async (reference: string) => {
+    const { providerName } = parseModelReference(reference)
+    const credential = await loadProviderCredential({ homeDir, providerName })
+    return createConfiguredModel(
+      reference,
+      loadedSettings.settings.providers,
+      environment,
+      credential,
+    )
+  }
+  const agents = new SubagentManager({
+    configDir,
+    projectCwd: cwd,
+    backgroundEnabled: loadedSettings.settings.subagents?.backgroundEnabled,
+    maxConcurrent: loadedSettings.settings.subagents?.maxConcurrent,
+    maxDepth: loadedSettings.settings.subagents?.maxDepth,
+    baseRef: loadedSettings.settings.worktree?.baseRef,
+    createRuntime: (metadata, parent) =>
+      createSubagentRuntime({
+        metadata,
+        parent,
+        manager: agents,
+        resolveModel,
+        loadUserContext,
+        policyFor,
+        permissionMode: permissionModeState,
+        permissionBroker,
+        sandbox,
+        memory,
+        homeDir,
+        persistApproval,
+        transcriptPath: getSessionPath({
+          configDir,
+          cwd,
+          sessionId: metadata.storageSessionId,
+          agentId: metadata.id,
+        }),
+      }),
+  })
+  let currentCanUseTool: CanUseTool
+  let currentAgentTool: AgentTool | undefined
   const createController = async (
     targetSessionId: SessionId,
     modelReference: string,
     name?: string,
   ): Promise<SessionController> => {
-    const { providerName } = parseModelReference(modelReference)
-    const providerCredential = await loadProviderCredential({ homeDir, providerName })
-    const { model, modelId, provider } = createConfiguredModel(
-      modelReference,
-      loadedSettings.settings.providers,
-      environment,
-      providerCredential,
-    )
+    const { model, modelId, provider } = await resolveModel(modelReference)
+    await agents.loadSession(targetSessionId)
     const existing = await tryLoadSession({ configDir, cwd, sessionId: targetSessionId })
     const writer = existing
       ? await SessionWriter.open({ configDir, cwd, sessionId: targetSessionId })
@@ -252,11 +322,8 @@ export async function startDock(options: StartDockOptions): Promise<void> {
         prepareWrite: (filePath: string, content: string) => memory.prepareWrite(filePath, content),
       },
     }
-    const permissionRules: PermissionRules = {
-      allow: loadedSettings.settings.permissions?.allow ?? [],
-      ask: loadedSettings.settings.permissions?.ask ?? [],
-      deny: loadedSettings.settings.permissions?.deny ?? [],
-    }
+    const policy = policyFor(targetSessionId)
+    const permissionRules: PermissionRules = policy.rules
     const tools = filterDeniedTools(
       [
         createReadTool(fileDependencies),
@@ -265,6 +332,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
         createGlobTool({ cwd }),
         createGrepTool({ cwd }),
         createBashTool({ cwd, homeDir, sandbox }),
+        ...createAgentTools(agents),
       ],
       permissionRules,
     )
@@ -284,14 +352,15 @@ export async function startDock(options: StartDockOptions): Promise<void> {
         createGlobTool({ cwd }),
         createGrepTool({ cwd }),
         createBashTool({ cwd, homeDir, sandbox }),
+        ...createAgentTools(agents),
       ],
       permissionRules,
     )
     const canUseTool = createCanUseTool({
       autoAllowInternalToolUse: (tool, input) =>
-        ['Read', 'Write', 'Edit'].includes(tool.name) &&
         typeof input.file_path === 'string' &&
-        memory.isMemoryPath(input.file_path),
+        ((['Read', 'Write', 'Edit'].includes(tool.name) && memory.isMemoryPath(input.file_path)) ||
+          (tool.name === 'Read' && agents.isOutputPath(targetSessionId, input.file_path))),
       autoAllowBashIfSandboxed: () => sandbox.autoAllowBashIfSandboxed,
       isBashSandboxed: (_tool, input) =>
         sandbox.shouldUseSandbox({
@@ -301,19 +370,14 @@ export async function startDock(options: StartDockOptions): Promise<void> {
             : {}),
         }),
       mode: () => permissionModeState.value,
-      persistApproval: async (rule) => {
-        await addLocalPermissionRule({
-          behavior: 'allow',
-          projectRoot: loadedSettings.projectRoot,
-          rule,
-        })
-        loadedSettings = await loadSettings({ cwd, homeDir })
-      },
+      persistApproval,
       requestApproval: (tool, input, decision, signal) =>
         permissionBroker.requestApproval(tool, input, decision, signal),
       rules: permissionRules,
-      sessionPermissions: new SessionPermissionState(),
+      sessionPermissions: policy.sessionPermissions,
     })
+    currentCanUseTool = canUseTool
+    currentAgentTool = tools.find((t) => t.name === 'Agent')
     const contextManager = new ContextManager({
       contextWindow: provider.contextWindow ?? 200_000,
       maxOutputTokens: provider.maxOutputTokens ?? 8_192,
@@ -360,6 +424,18 @@ export async function startDock(options: StartDockOptions): Promise<void> {
         })
       : undefined
     return new SessionController({
+      getAgentIdentity: () => ({
+        sessionId: targetSessionId,
+        depth: 0,
+        contextMode: 'main',
+        cwd,
+        modelReference,
+        fileReadState: readFileState,
+      }),
+      inbox: {
+        peek: (seen) => agents.pendingNotifications(targetSessionId, seen),
+        ack: (ids) => agents.ackNotifications(targetSessionId, ids as readonly UUID[]),
+      },
       canUseTool,
       contextManager,
       fileHistory,
@@ -397,6 +473,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     async clear() {
       const targetSessionId = createSessionId()
       await runtime.replace(() => createController(targetSessionId, currentModelReference))
+      await agents.retargetAfterClear(currentSessionId, targetSessionId)
       currentSessionId = targetSessionId
     },
     async listSessions() {
@@ -438,6 +515,38 @@ export async function startDock(options: StartDockOptions): Promise<void> {
   }
   const app = new DockTuiApp({
     controller: runtime,
+    agentCommands: {
+      list: () => agents.list(currentSessionId),
+      snapshot: (id) => agents.snapshot(currentSessionId, id),
+      stop: (id) => agents.stop(currentSessionId, id, 'user'),
+      send: (id, text) => agents.send(currentSessionId, id, text, { fromUser: true }),
+      background: async () => {
+        await agents.backgroundForeground(currentSessionId)
+      },
+      close: () => agents.close(),
+      launch: async (prompt) => {
+        if (!currentAgentTool?.parseInput) throw new Error('Agent is denied by permissions')
+        const snapshot = runtime.getSnapshot()
+        const input = currentAgentTool.parseInput({
+          prompt,
+          description: prompt.slice(0, 80),
+          context: 'fork',
+        })
+        const controller = new AbortController()
+        const permission = await currentCanUseTool(currentAgentTool, input, {
+          agent: snapshot,
+          signal: controller.signal,
+          toolUseId: 'user-subtask',
+          parentMessageUuid: snapshot.messages.at(-1)?.uuid ?? crypto.randomUUID(),
+        })
+        if (permission.behavior === 'deny') throw new Error(permission.message ?? 'Agent denied')
+        return agents.spawn(
+          snapshot,
+          { prompt, description: prompt.slice(0, 80), context: 'fork' },
+          { fromUser: true, signal: controller.signal },
+        )
+      },
+    },
     memoryNotificationBroker,
     permissionBroker,
     sandboxNetworkPermissionBroker,
@@ -446,10 +555,15 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     startupNotices: sandbox.unavailableReason ? [sandbox.unavailableReason] : [],
     tui,
   })
+  agents.setWakeHandler((id) => {
+    if (id === currentSessionId) app.notifyTasksChanged()
+  })
   app.start()
+  app.notifyTasksChanged()
   try {
     await app.waitUntilStopped()
   } finally {
+    await agents.close()
     await sandbox.reset()
   }
 }
