@@ -104,7 +104,7 @@ export class AgentWorktrees {
       '--name-only',
       '--null',
       '--get-regexp',
-      '^(filter\\.|includeIf\\.)',
+      '^(filter\\.|includeif\\.)',
     ]).catch((error) => {
       if (error && typeof error === 'object' && 'code' in error && error.code === 1) return ''
       throw new Error('Cannot inspect repository filters before creating worktree')

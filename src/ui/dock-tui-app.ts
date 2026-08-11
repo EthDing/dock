@@ -226,12 +226,15 @@ export class DockTuiApp {
         this.#tui.requestRender()
         this.notifyTasksChanged()
       }
+      const queued = this.#queue.shift()
+      if (queued) await this.submit(queued)
       return
     }
     if (trimmed === '/clear') {
-      await this.#sessionCommands?.clear()
-      this.#clearTranscript()
-      this.notifyTasksChanged()
+      await this.#changeSession(async () => {
+        await this.#sessionCommands?.clear()
+        this.#clearTranscript()
+      })
       return
     }
     if (trimmed === '/context') {
@@ -241,7 +244,7 @@ export class DockTuiApp {
     }
     if (trimmed === '/compact' || trimmed.startsWith('/compact ')) {
       this.#busy = true
-      this.#editor.disableSubmit = true
+      this.#editor.disableSubmit = false
       this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · compacting`)
       this.#tui.requestRender()
       try {
@@ -298,13 +301,17 @@ export class DockTuiApp {
       return
     }
     if (trimmed === '/branch' || trimmed.startsWith('/branch ')) {
-      await this.#sessionCommands?.branch(trimmed.slice('/branch'.length).trim() || undefined)
-      this.#renderControllerHistory()
+      await this.#changeSession(async () => {
+        await this.#sessionCommands?.branch(trimmed.slice('/branch'.length).trim() || undefined)
+        this.#renderControllerHistory()
+      })
       return
     }
     if (trimmed.startsWith('/model ')) {
-      await this.#sessionCommands?.setModel(trimmed.slice('/model '.length).trim())
-      this.#renderControllerHistory()
+      await this.#changeSession(async () => {
+        await this.#sessionCommands?.setModel(trimmed.slice('/model '.length).trim())
+        this.#renderControllerHistory()
+      })
       return
     }
     if (trimmed === '/model') {
@@ -318,8 +325,9 @@ export class DockTuiApp {
 
   async #renderRun(events: AsyncIterable<AgentEvent>): Promise<void> {
     this.#busy = true
-    this.#editor.disableSubmit = true
+    this.#editor.disableSubmit = false
     this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · working`)
+    const toolNames = new Map<string, string>()
     let assistant: Markdown | undefined
     let assistantText = ''
     let thinking: Text | undefined
@@ -334,7 +342,9 @@ export class DockTuiApp {
           thinkingText = ''
         }
         if (event.type === 'user_message' && event.message.agentEventKey) {
-          this.#insertTranscript(new Text('Subagent update received', 1, 0))
+          this.#insertTranscript(
+            new Text(`Subagent ${event.message.agentEventKey.split(':')[0]} update received`, 1, 0),
+          )
         }
         if (
           event.type === 'model_stream' &&
@@ -359,11 +369,23 @@ export class DockTuiApp {
           }
           thinking.setText(`Thinking: ${thinkingText}`)
         } else if (event.type === 'tool_execution_start') {
+          toolNames.set(event.toolUse.id, event.toolUse.name)
           this.#renderToolStart(event.toolUse)
         } else if (event.type === 'tool_result') {
-          this.#insertTranscript(
-            new Text(event.result.isError ? `  Error: ${event.result.content}` : '  Done', 1, 0),
-          )
+          let detail = event.result.isError ? `  Error: ${event.result.content}` : '  Done'
+          if (toolNames.get(event.result.toolUseId) === 'Agent' && !event.result.isError) {
+            try {
+              const task = JSON.parse(String(event.result.content)) as {
+                id: string
+                status: string
+                outputFile: string
+              }
+              detail = `  Agent ${task.id} · ${task.status}\n  ${task.outputFile}`
+            } catch {
+              /* Non-JSON results retain the generic tool completion display. */
+            }
+          }
+          this.#insertTranscript(new Text(detail, 1, 0))
         } else if (event.type === 'compaction_status') {
           if (event.status === 'started')
             this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · compacting`)
@@ -483,7 +505,11 @@ export class DockTuiApp {
     const path = typeof toolUse.input.file_path === 'string' ? toolUse.input.file_path : undefined
     const command = typeof toolUse.input.command === 'string' ? toolUse.input.command : undefined
     const pattern = typeof toolUse.input.pattern === 'string' ? toolUse.input.pattern : undefined
-    const detail = path ?? command ?? pattern
+    const detail =
+      path ??
+      command ??
+      pattern ??
+      (typeof toolUse.input.description === 'string' ? toolUse.input.description : undefined)
     this.#insertTranscript(
       new Text(`● ${toolUse.name}${detail ? `(${truncateDisplay(detail)})` : ''}`, 1, 0),
     )
@@ -537,7 +563,27 @@ export class DockTuiApp {
         request.tool.getPermissionRule?.(request.input) ? 4 : 3,
         selectListTheme,
       )
-      const overlay = this.#tui.showOverlay(list, { anchor: 'bottom-center', width: '70%' })
+      const title = new Text(
+        [
+          request.requester
+            ? `Agent: ${request.requester.label} [${request.requester.agentId}]`
+            : 'Main agent',
+          `${request.tool.name}: ${truncateDisplay(JSON.stringify(request.input))}`,
+        ].join('\n'),
+        0,
+        0,
+      )
+      const overlay = this.#tui.showOverlay(
+        {
+          render: (width) => [...title.render(width), ...list.render(width)],
+          handleInput: (data) => list.handleInput(data),
+          invalidate: () => {
+            title.invalidate()
+            list.invalidate()
+          },
+        },
+        { anchor: 'bottom-center', width: '70%' },
+      )
       let settled = false
       const finish = (approval: PermissionApproval) => {
         if (settled) return
@@ -671,8 +717,23 @@ export class DockTuiApp {
         (await this.#select(sessions.map((session) => ({ ...session, description: '' })))) ?? ''
     }
     if (!selected) return
-    await this.#sessionCommands.resume(selected)
-    this.#renderControllerHistory()
+    await this.#changeSession(async () => {
+      await this.#sessionCommands?.resume(selected)
+      this.#renderControllerHistory()
+    })
+  }
+
+  async #changeSession(change: () => Promise<void>): Promise<void> {
+    this.#busy = true
+    try {
+      await change()
+    } finally {
+      this.#busy = false
+      this.#setReadyStatus()
+      this.notifyTasksChanged()
+    }
+    const queued = this.#queue.shift()
+    if (queued) await this.submit(queued)
   }
 
   #renderControllerHistory(): void {

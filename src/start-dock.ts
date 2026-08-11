@@ -494,7 +494,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       currentSessionId = targetSessionId
     },
     async setModel(reference) {
-      createConfiguredModel(reference, loadedSettings.settings.providers, environment)
+      await resolveModel(reference)
       if (reference === currentModelReference) return
       await runtime.replace(() => createController(currentSessionId, reference))
       currentModelReference = reference

@@ -104,4 +104,40 @@ describeLinux('sandbox integration', () => {
       await sandbox.reset()
     }
   })
+  it('runs simultaneous commands with scoped child cwd configurations on one initialized runtime', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dock-sandbox-children-')),
+      cwd = join(root, 'main'),
+      a = join(root, 'a'),
+      b = join(root, 'b'),
+      homeDir = join(root, 'home')
+    await Promise.all([cwd, a, b].map((path) => mkdir(path, { recursive: true })))
+    const sandbox = new DockSandbox({
+      settings: { enabled: true },
+      config: createSandboxRuntimeConfig({ cwd, homeDir, settings: {} }),
+    })
+    await sandbox.initialize(async () => false)
+    expect(sandbox.isEnabled, sandbox.unavailableReason).toBe(true)
+    try {
+      const execution = {
+        parentMessageUuid: asMessageUuid('a0000000-0000-4000-8000-000000000003'),
+        signal: new AbortController().signal,
+        toolUseId: 'a',
+      }
+      const results = await Promise.all([
+        createBashTool({ cwd: a, homeDir, sandbox: sandbox.forCwd(a) }).execute(
+          { command: 'printf child-a > own.txt' },
+          execution,
+        ),
+        createBashTool({ cwd: b, homeDir, sandbox: sandbox.forCwd(b) }).execute(
+          { command: 'printf child-b > own.txt' },
+          { ...execution, toolUseId: 'b' },
+        ),
+      ])
+      expect(results.every((r) => !r.isError)).toBe(true)
+      expect(await readFile(join(a, 'own.txt'), 'utf8')).toBe('child-a')
+      expect(await readFile(join(b, 'own.txt'), 'utf8')).toBe('child-b')
+    } finally {
+      await sandbox.reset()
+    }
+  })
 })

@@ -420,3 +420,194 @@ it('drains a task still being registered when shutdown starts', async () => {
   expect(agent.status).toBe('stopped')
   expect(calls).toBe(0)
 })
+it('omits Agent at the fresh depth limit but preserves a fork tool table with runtime rejection', async () => {
+  const { createAgentTools } = await import('../../src/agents/tools.js')
+  const configDir = await mkdtemp(join(tmpdir(), 'dock-agent-depth-')),
+    requests: ModelRequest[] = []
+  const manager = new SubagentManager({
+    configDir,
+    projectCwd: '/work',
+    createRuntime: async () => ({
+      model: {
+        async *stream(request) {
+          requests.push(request)
+          yield* response('done')
+        },
+      },
+      modelId: 'model',
+      tools: createAgentTools(manager),
+      fileReadState: new FileReadState(),
+    }),
+  })
+  const p = { ...parent(), depth: 2 }
+  const fresh = await manager.spawn(p, { prompt: 'task', description: 'fresh' })
+  await manager.wait(fresh.id)
+  expect(requests[0]?.tools.some((t) => t.name === 'Agent')).toBe(false)
+  const fork = await manager.spawn(
+    { ...p, tools: createAgentTools(manager) },
+    { prompt: 'task', description: 'fork', context: 'fork' },
+  )
+  await manager.wait(fork.id)
+  expect(requests[1]?.tools.some((t) => t.name === 'Agent')).toBe(true)
+  await expect(
+    manager.spawn({ ...p, depth: 3 }, { prompt: 'too deep', description: 'deep' }),
+  ).rejects.toThrow('depth')
+  await manager.close()
+})
+it('routes nested completion to the calling agent and supports model stop without self-deadlock', async () => {
+  const { createAgentTools } = await import('../../src/agents/tools.js')
+  const configDir = await mkdtemp(join(tmpdir(), 'dock-agent-nested-'))
+  let parentCalls = 0,
+    childCalls = 0
+  const call = (name: string, input: Record<string, unknown>): ModelStreamEvent[] => [
+    { type: 'message_start', messageId: name },
+    { type: 'content_block_start', index: 0, block: { type: 'tool_use', id: name, name } },
+    {
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'input_json_delta', partialJson: JSON.stringify(input) },
+    },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', stopReason: 'tool_use', usage: {} },
+    { type: 'message_stop' },
+  ]
+  const manager = new SubagentManager({
+    configDir,
+    projectCwd: '/work',
+    backgroundEnabled: false,
+    createRuntime: async (meta) => ({
+      modelId: 'model',
+      tools: createAgentTools(manager),
+      fileReadState: new FileReadState(),
+      model: {
+        async *stream() {
+          if (meta.description === 'parent') {
+            parentCalls++
+            if (parentCalls === 1)
+              yield* call('Agent', { prompt: 'child task', description: 'child' })
+            else yield* response('parent received child result')
+          } else {
+            childCalls++
+            yield* call('TaskStop', { task_id: meta.id })
+          }
+        },
+      },
+    }),
+  })
+  const p = parent(),
+    actor = await manager.spawn(p, { prompt: 'parent task', description: 'parent' })
+  expect(actor.status).toBe('completed')
+  const agents = await manager.list(p.sessionId),
+    child = agents.find((a) => a.parentAgentId === actor.id)
+  expect(child).toMatchObject({ status: 'stopped', stoppedBy: 'model' })
+  expect(parentCalls).toBe(2)
+  expect(childCalls).toBe(1)
+  expect(await manager.pendingNotifications(p.sessionId)).toEqual([])
+  await manager.close()
+})
+it('wakes a completed parent for a background descendant report without leaking that report as a sibling event', async () => {
+  const configDir = await mkdtemp(join(tmpdir(), 'dock-agent-parent-wake-')),
+    requests: ModelRequest[] = []
+  const manager = new SubagentManager({
+    configDir,
+    projectCwd: '/work',
+    createRuntime: async (meta) => ({
+      modelId: 'model',
+      tools: [],
+      fileReadState: new FileReadState(),
+      model: {
+        async *stream(request) {
+          if (meta.description === 'parent') requests.push(request)
+          yield* response(`${meta.description} done`)
+        },
+      },
+    }),
+  })
+  const p = parent(),
+    top = await manager.spawn(p, { prompt: 'parent task', description: 'parent' })
+  await manager.wait(top.id)
+  const child = await manager.spawn(
+    { ...p, agentId: top.id, depth: 1, contextMode: 'fresh' },
+    { prompt: 'nested task', description: 'child' },
+  )
+  await manager.wait(child.id)
+  await manager.wait(top.id)
+  expect(requests).toHaveLength(2)
+  expect(JSON.stringify(requests[1])).toContain(child.id)
+  const events = await manager.pendingNotifications(p.sessionId)
+  expect(events.every((e) => e.agentEventKey?.startsWith(`${top.id}:`))).toBe(true)
+  await manager.close()
+})
+it('freezes fork read state at dispatch rather than after asynchronous runtime setup', async () => {
+  const configDir = await mkdtemp(join(tmpdir(), 'dock-agent-read-snapshot-'))
+  let release!: () => void, captured: AgentSnapshot | undefined
+  const gate = new Promise<void>((r) => {
+    release = r
+  })
+  const manager = new SubagentManager({
+    configDir,
+    projectCwd: '/work',
+    createRuntime: async (_meta, snapshot) => {
+      await gate
+      captured = snapshot
+      return {
+        modelId: 'm',
+        tools: [],
+        fileReadState: new FileReadState(),
+        model: {
+          async *stream() {
+            yield* response('done')
+          },
+        },
+      }
+    },
+  })
+  const p = parent(),
+    state = new FileReadState()
+  state.set('/work/file', { content: 'old', isPartialView: false, timestamp: 1 })
+  const child = await manager.spawn(
+    { ...p, fileReadState: state },
+    { prompt: 'task', description: 'fork', context: 'fork' },
+  )
+  state.set('/work/file', { content: 'new', isPartialView: false, timestamp: 2 })
+  release()
+  await manager.wait(child.id)
+  expect(captured?.fileReadState?.get('/work/file')?.content).toBe('old')
+  await manager.close()
+})
+it('carries foreground descendants of a background parent across clear', async () => {
+  let release!: () => void,
+    started = 0
+  const gate = new Promise<void>((r) => {
+    release = r
+  })
+  const manager = await setup(
+    {
+      async *stream() {
+        started++
+        await gate
+        yield* response('done')
+      },
+    },
+    { backgroundEnabled: false },
+  )
+  const p = parent(),
+    top = await manager.spawn(p, { prompt: 'parent', description: 'parent' }, { fromUser: true })
+  await until(() => started === 1)
+  const child = manager.spawn(
+    { ...p, agentId: top.id, depth: 1, contextMode: 'fork' },
+    { prompt: 'child', description: 'child' },
+  )
+  await until(() => started === 2)
+  const next = createSessionId()
+  await manager.retargetAfterClear(p.sessionId, next)
+  try {
+    expect(await manager.list(next)).toHaveLength(2)
+    expect(await manager.list(p.sessionId)).toEqual([])
+  } finally {
+    release()
+    await child
+    await manager.wait(top.id)
+    await manager.close()
+  }
+})

@@ -405,3 +405,123 @@ it('closes an outstanding network permission dialog during shutdown', async () =
   await app.stop()
   expect(await pending).toEqual({ allow: false, persist: false })
 })
+it('holds completion delivery until a session switch finishes', async () => {
+  let release!: () => void,
+    calls = 0
+  const gate = new Promise<void>((r) => {
+    release = r
+  })
+  const controller: DockUiController = {
+    abort: () => {},
+    close: async () => {},
+    async *submit() {},
+    async *processNotifications() {
+      calls++
+      yield* []
+    },
+  }
+  const commands: DockSessionCommands = {
+    branch: async () => {},
+    clear: async () => {},
+    listSessions: async () => [],
+    resume: async () => {},
+    setModel: async () => {
+      await gate
+    },
+  }
+  const app = new DockTuiApp({
+    controller,
+    sessionCommands: commands,
+    tui: new TuiMainScreen(new MemoryTerminal()),
+  })
+  const changing = app.submit('/model test:new')
+  app.notifyTasksChanged()
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(calls).toBe(0)
+  release()
+  await changing
+  await vi.waitFor(() => expect(calls).toBe(1))
+  await app.stop()
+})
+it('shows the stable identity and state returned by Agent instead of only Done', async () => {
+  const controller: DockUiController = {
+    abort: () => {},
+    close: async () => {},
+    async *submit() {
+      yield {
+        type: 'tool_execution_start',
+        toolUse: {
+          type: 'tool_use',
+          id: 'call',
+          name: 'Agent',
+          input: { description: 'Inspect files' },
+        },
+      }
+      yield {
+        type: 'tool_result',
+        result: {
+          type: 'tool_result',
+          toolUseId: 'call',
+          content: JSON.stringify({
+            id: 'stable-child',
+            status: 'running',
+            outputFile: '/tmp/child.jsonl',
+          }),
+        },
+      }
+    },
+  }
+  const tui = new TuiMainScreen(new MemoryTerminal()),
+    app = new DockTuiApp({ controller, tui })
+  await app.submit('delegate')
+  expect(tui.render(100).join('\n')).toContain('stable-child')
+  expect(tui.render(100).join('\n')).toContain('running')
+  await app.stop()
+})
+it('accepts /tasks from the terminal while the main model is still running', async () => {
+  let release!: () => void
+  const gate = new Promise<void>((r) => {
+      release = r
+    }),
+    list = vi.fn(async () => [])
+  const controller: DockUiController = {
+    abort: () => release(),
+    close: async () => {},
+    async *submit() {
+      await gate
+      yield* []
+    },
+  }
+  const terminal = new MemoryTerminal(),
+    app = new DockTuiApp({
+      controller,
+      tui: new TuiMainScreen(terminal),
+      agentCommands: {
+        list,
+        launch: async () => {
+          throw Error('unused')
+        },
+        snapshot: async () => {
+          throw Error('unused')
+        },
+        stop: async () => {
+          throw Error('unused')
+        },
+        send: async () => {},
+        background: async () => {},
+        close: async () => {},
+      },
+    })
+  app.start()
+  const active = app.submit('working')
+  terminal.send('/tasks')
+  terminal.send('\r')
+  try {
+    await vi.waitFor(() => expect(list).toHaveBeenCalledOnce())
+  } finally {
+    release()
+    await active
+    await app.stop()
+  }
+})

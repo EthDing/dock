@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Terminal } from '@dock/tui'
 import * as modelFactory from '../../src/model/create-model-adapter.js'
 import type { ModelAdapter, ModelRequest, ModelStreamEvent } from '../../src/model/types.js'
+import { saveProviderCredential } from '../../src/config/credentials.js'
 import { startDock } from '../../src/start-dock.js'
 import { getProjectSessionsDirectory, loadSession } from '../../src/sessions/session-store.js'
 import { asSessionId } from '../../src/sessions/ids.js'
@@ -81,13 +82,19 @@ describe('subagents through real startup and simulated terminal', () => {
         )
       },
     }
-    const spy = vi.spyOn(modelFactory, 'createModelAdapter').mockReturnValue(model)
+    await saveProviderCredential({ homeDir, providerName: 'test', apiKey: 'test-only' })
+    const spy = vi
+      .spyOn(modelFactory, 'createModelAdapter')
+      .mockImplementation((_provider, _environment, key) => {
+        if (key !== 'test-only') throw Error('Stored credential missing during model switch')
+        return model
+      })
     const terminal = new TerminalStub()
     const running = startDock({
       args: [],
       cwd,
       homeDir,
-      environment: { TEST_KEY: 'test-only' },
+      environment: {},
       terminal,
       workspaceTrustPrompter: async () => true,
     })
@@ -103,6 +110,11 @@ describe('subagents through real startup and simulated terminal', () => {
       )
       terminal.send('/tasks')
       await until(() => terminal.output.includes('completed'))
+      const beforeSwitch = spy.mock.calls.length
+      terminal.send('/model test:other')
+      await until(() => spy.mock.calls.length > beforeSwitch)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(terminal.output).not.toContain('Stored credential missing')
       terminal.send('/exit')
       await running
       expect(requests.some((r) => r.tools?.some((t) => t.name === 'Agent'))).toBe(true)

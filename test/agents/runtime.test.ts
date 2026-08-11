@@ -241,3 +241,73 @@ it('compacts only the child transcript and never runs time-based clearing or ext
   expect(JSON.stringify(history)).toBe(before)
   await s.manager.close()
 })
+it('binds file and Bash tools to the worktree, and refuses resume when that owned checkout disappears', async () => {
+  const { execFile } = await import('node:child_process'),
+    { promisify } = await import('node:util')
+  const { writeFile, readFile, rename } = await import('node:fs/promises')
+  const execute = promisify(execFile),
+    s = await setup()
+  await execute('git', ['init', '-b', 'main', s.cwd])
+  await execute('git', ['-C', s.cwd, 'config', 'user.name', 'Test'])
+  await execute('git', ['-C', s.cwd, 'config', 'user.email', 'test@example.invalid'])
+  await writeFile(join(s.cwd, 'base.txt'), 'main')
+  await execute('git', ['-C', s.cwd, 'add', 'base.txt'])
+  await execute('git', ['-C', s.cwd, 'commit', '-m', 'base'])
+  let calls = 0,
+    childRuntime: Awaited<ReturnType<typeof createSubagentRuntime>> | undefined
+  const manager = new SubagentManager({
+    configDir: s.configDir,
+    projectCwd: s.cwd,
+    baseRef: 'head',
+    createRuntime: async (metadata, parent) => {
+      calls++
+      childRuntime = await createSubagentRuntime({
+        ...s.options,
+        metadata,
+        parent,
+        manager,
+        transcriptPath: 'test',
+      })
+      const write = childRuntime.tools.find((t) => t.name === 'Write'),
+        bash = childRuntime.tools.find((t) => t.name === 'Bash')
+      if (!write || !bash || !childRuntime.canUseTool) throw Error('missing tools')
+      s.mode.set('bypassPermissions')
+      const execution = {
+        signal: new AbortController().signal,
+        parentMessageUuid: randomUUID(),
+        toolUseId: 'w',
+      }
+      expect(
+        (
+          await childRuntime.canUseTool(
+            write,
+            { file_path: join(s.cwd, 'base.txt'), content: 'wrong' },
+            execution,
+          )
+        ).behavior,
+      ).toBe('deny')
+      await write.execute(
+        { file_path: join(metadata.cwd, 'child.txt'), content: 'child' },
+        execution,
+      )
+      expect((await bash.execute({ command: 'pwd' }, execution)).content).toContain(metadata.cwd)
+      return childRuntime
+    },
+  })
+  const child = await manager.spawn(s.parent, {
+    prompt: 'task',
+    description: 'isolated',
+    isolation: 'worktree',
+  })
+  const done = await manager.wait(child.id)
+  expect(done.status).toBe('completed')
+  if (!done.worktree) throw Error('changed worktree was removed')
+  expect(await readFile(join(s.cwd, 'base.txt'), 'utf8')).toBe('main')
+  await rename(done.worktree.path, `${done.worktree.path}-moved`)
+  await manager.send(s.sessionId, child.id, 'continue')
+  const failed = await manager.wait(child.id)
+  expect(failed.status).toBe('failed')
+  expect(calls).toBe(1)
+  await manager.close()
+  await s.manager.close()
+})

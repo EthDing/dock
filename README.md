@@ -118,3 +118,37 @@ skip ordinary approval prompts, while explicit deny rules and critical deletion 
 The current workspace is writable, Dock credentials are unreadable, and network access is routed
 through a domain approval prompt. Persistent domain approvals are stored in
 `.dock/settings.local.json`.
+
+## Subagents
+
+Ask Dock to delegate a focused task, or run `/subtask <task>` to explicitly fork the current
+conversation in the background. There are no predefined roles or custom role files.
+The Agent tool defaults to fresh context; explicit forks inherit the parent model and request
+prefix. Fresh agents can select a configured `provider:model`.
+
+`/tasks` lists IDs, states and output files. Use `/tasks <id>` to inspect the transcript,
+`/tasks stop <id>` to stop it, `/tasks continue <id> [message]` to resume, and
+`/tasks send <id> <message>` to steer it. Model messages cannot restart a user-stopped task.
+Ctrl+B backgrounds a foreground delegation without changing its ID; main Escape leaves
+background tasks running. Child edits are not covered by the parent's `/rewind`.
+
+Optional configuration (normal user/project/local precedence):
+
+```json
+{
+  "subagents": { "backgroundEnabled": true, "maxConcurrent": 20, "maxDepth": 3 },
+  "worktree": { "baseRef": "fresh" }
+}
+```
+
+Set `backgroundEnabled` to false for foreground Agent tool calls; explicit `/subtask` remains
+background. Set `worktree.baseRef` to `"head"` to start from the caller's current commit.
+Agent's `isolation: "worktree"` creates a Dock-owned Git worktree. Changed trees and new commits
+are retained; unchanged trees are cleaned up. No dirty files, environment files or dependencies
+are copied. Write/Edit cannot write back into the main checkout. Bash only receives the child cwd
+and existing permissions/sandbox: **worktree is not a Bash security boundary**.
+
+See [subagent internals](docs/internals/subagents.md) and the
+[behavior/source/test alignment](docs/internals/subagents-alignment.md).
+`pnpm exec tsx scripts/smoke-subagents.mts` performs a small billed delegation check using synthetic
+arithmetic only, without sending project files.

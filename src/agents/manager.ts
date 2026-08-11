@@ -10,7 +10,7 @@ import {
 import type { ModelAdapter, Usage } from '../model/types.js'
 import { isUuid, type SessionId } from '../sessions/ids.js'
 import { loadSession, SessionWriter } from '../sessions/session-store.js'
-import type { FileReadState } from '../tools/file-read-state.js'
+import { FileReadState } from '../tools/file-read-state.js'
 import type { AgentTool, CanUseTool } from '../tools/types.js'
 import { buildChildContext, sanitizeAgentReport } from './context.js'
 import { AgentStore, type AgentIndex, type AgentMessageOptions } from './store.js'
@@ -31,7 +31,6 @@ type Actor = {
   resumeRequested?: boolean | undefined
   meta: AgentMetadata
   messages: readonly TranscriptMessage[]
-  initial?: readonly TranscriptMessage[] | undefined
   parentSnapshot?: AgentSnapshot | undefined
   running?: Promise<void> | undefined
   abort?: AbortController | undefined
@@ -123,6 +122,28 @@ export class SubagentManager {
   ): Promise<AgentView> {
     if (this.#closed) throw new Error('Agent runtime is closed')
     const mode = input.context ?? 'fresh'
+    const caller = parent.agentId ? this.#actors.get(parent.agentId) : undefined
+    if (caller) parent = { ...parent, sessionId: caller.meta.sessionId }
+    if (mode === 'fork') {
+      const fileReadState = new FileReadState()
+      for (const [path, value] of parent.fileReadState?.entries() ?? [])
+        fileReadState.set(path, { ...value })
+      // Freeze before awaiting credentials, disk or worktree setup; the parent keeps running.
+      parent = {
+        ...parent,
+        fileReadState,
+        messages: structuredClone([...parent.messages]),
+        tools: structuredClone(
+          parent.tools.map(({ name, description, inputSchema }) => ({
+            name,
+            description,
+            inputSchema,
+          })),
+        ),
+        systemPrompt: [...parent.systemPrompt],
+        userContext: { ...parent.userContext },
+      }
+    }
     if (!input.prompt.trim() || !input.description.trim())
       throw new Error('Agent task and description are required')
     if (parent.depth >= (this.#options.maxDepth ?? 3))
@@ -204,9 +225,9 @@ export class SubagentManager {
         options.signal.addEventListener('abort', abort, { once: true })
         actor.detachParent = () => options.signal?.removeEventListener('abort', abort)
       }
-      if (this.#closed) {
+      if (this.#closed || meta.stoppedBy) {
         meta.status = 'stopped'
-        meta.stoppedBy = 'shutdown'
+        meta.stoppedBy ??= 'shutdown'
         if (meta.worktree) {
           try {
             meta.worktreeRemoved = (await this.#worktrees.finish(meta.worktree)) === 'removed'
@@ -333,12 +354,32 @@ export class SubagentManager {
   async retargetAfterClear(from: SessionId, to: SessionId): Promise<void> {
     const previous = await this.#root(from),
       next = await this.#root(to)
-    for (const actor of this.#actors.values()) {
-      if (actor.meta.sessionId !== from || !actor.meta.background) continue
+    const moving = new Set(
+      [...this.#actors.values()]
+        .filter((a) => a.meta.sessionId === from && a.meta.background)
+        .map((a) => a.meta.id),
+    )
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const actor of this.#actors.values()) {
+        if (
+          actor.meta.sessionId === from &&
+          actor.meta.parentAgentId &&
+          moving.has(actor.meta.parentAgentId) &&
+          !moving.has(actor.meta.id)
+        ) {
+          moving.add(actor.meta.id)
+          changed = true
+        }
+      }
+    }
+    const moved = [...this.#actors.values()].filter((actor) => moving.has(actor.meta.id))
+    for (const actor of moved) {
       actor.meta.sessionId = to
       next.agents[actor.meta.id] = actor.meta.storageSessionId
-      await this.#save(actor)
     }
+    await Promise.all(moved.map((actor) => this.#save(actor)))
     next.pending.push(...previous.pending)
     previous.pending = []
     next.nameBindings = {}
@@ -456,20 +497,9 @@ export class SubagentManager {
       const runtime = await this.#options.createRuntime(meta, actor.parentSnapshot)
       signal.throwIfAborted()
       const location = this.#store.location(meta)
-      if (actor.initial) {
-        writer = await SessionWriter.create({
-          ...location,
-          agentCwd: meta.cwd,
-          ...(meta.parentAgentId ? { parentAgentId: meta.parentAgentId } : {}),
-        })
-        actor.messages = actor.initial
-        actor.initial = undefined
-        await writer.recordTranscript(actor.messages)
-      } else {
-        const loaded = await loadSession(location)
-        actor.messages = loaded.messages
-        writer = await SessionWriter.open(location)
-      }
+      const loaded = await loadSession(location)
+      actor.messages = loaded.messages
+      writer = await SessionWriter.open(location)
       const tail = actor.messages.at(-1)
       if (tail?.type === 'assistant') {
         const calls = tail.message.content.filter((block) => block.type === 'tool_use')
