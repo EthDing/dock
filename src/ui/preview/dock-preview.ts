@@ -19,9 +19,9 @@ const palette = {
   shade: '187;188;186',
   seam: '83;84;82',
   green: '103;207;149',
-  accent: '218;138;102',
+  accent: '124;190;163',
   text: '216;216;211',
-  muted: '139;140;135',
+  muted: '126;135;135',
 }
 const reset = '\x1b[0m'
 const fg = (rgb: string) => `\x1b[38;2;${rgb}m`
@@ -190,55 +190,48 @@ export class DockPreview implements Component, Focusable {
   }
 
   #welcome(width: number, compact: boolean): string[] {
-    const inside = width - 4
-    const columns = width >= 76 && !compact
-    const leftWidth = columns ? Math.min(48, Math.floor(inside * 0.43)) : inside
     const logo = renderCaseLogo(this.#effectiveLogoRows)
-    const left = [
-      color('Welcome back!', palette.text),
-      ...(compact ? [] : ['']),
-      ...logo,
-      ...(compact ? [] : ['']),
+    const title = `\x1b[1m${color('Dock', palette.text)}  ${dim('0.0.0')}`
+    const info = [
+      title,
+      color('~/code/dock', palette.text),
       dim('deepseek-v4-flash'),
-      dim('~/code/dock'),
-    ]
-    const right = [
-      accent('Commands'),
       '',
-      `/compact   ${dim('Compact context')}`,
-      `/tasks     ${dim('View subagents')}`,
-      `/subtask   ${dim('Fork a task')}`,
-      '',
-      dim('Local UI preview'),
-      dim('No model or tools connected'),
+      `${accent('●')} ${dim('ready')}`,
     ]
-    const title = ` Dock ${dim('v0.0.0')} `
-    const top =
-      accent('╭─') + title + accent(`${'─'.repeat(Math.max(0, width - visibleWidth(title) - 3))}╮`)
-    const body = Array.from(
-      { length: Math.max(left.length, columns ? right.length : 0) },
-      (_, i) => {
-        const a = center(left[i] ?? '', leftWidth)
-        const line = columns ? a + dim(' │ ') + pad(right[i] ?? '', inside - leftWidth - 3) : a
-        return `${accent('│')} ${pad(line, inside)} ${accent('│')}`
-      },
-    )
-    return [top, ...body, accent(`╰${'─'.repeat(width - 2)}╯`)]
+    if (width < 54) {
+      const details = compact ? [title, dim('~/code/dock')] : info.slice(0, 3)
+      return [
+        ...(compact ? [] : ['']),
+        ...logo.map((line) => center(line, width)),
+        ...(compact ? [] : ['']),
+        ...details.map((line) => center(line, width)),
+        '',
+      ]
+    }
+    const logoWidth = this.#effectiveLogoRows * 3 + 3
+    const details = compact ? info.slice(0, 3) : info
+    const offset = Math.max(0, Math.floor((logo.length - details.length) / 2))
+    return [
+      '',
+      ...logo.map((line, i) => `  ${pad(line, logoWidth)}    ${details[i - offset] ?? ''}`),
+      '',
+    ]
   }
 
   #conversation(width: number): string[] {
     if (this.#scene === 'welcome') return []
-    const result: string[] = ['', '']
+    const result: string[] = ['']
     for (const prompt of this.#prompts) {
-      result.push(...new Text(`❯ ${prompt}`, 0, 0).render(width), '')
-      result.push('● 我先看看现有的显示逻辑。', '')
-      result.push(`● Read ${dim('src/ui/dock-tui-app.ts')}`)
-      result.push(dim('  └ Read 1 file'), '')
-      result.push(`● Edit ${dim('src/ui/themes.ts')}`)
-      if (this.#scene === 'permission') result.push(dim('  └ Waiting for approval'))
+      result.push(dim('you'), ...new Text(prompt, 0, 0).render(width), '')
+      result.push(accent('dock'), '我先看看现有的显示逻辑。', '')
+      result.push(dim('  read   ') + color('src/ui/dock-tui-app.ts', palette.text))
+      result.push(dim('         1 file'), '')
+      result.push(dim('  edit   ') + color('src/ui/themes.ts', palette.text))
+      if (this.#scene === 'permission') result.push(dim('         waiting for approval'))
       else {
-        result.push(dim(`  └ ${this.#decision ?? 'Updated styles (example)'}`), '')
-        if (!this.#decision) result.push('● 工具名与结果保留，辅助信息使用灰色。')
+        result.push(dim(`         ${this.#decision ?? 'updated · example'}`), '')
+        if (!this.#decision) result.push('工具名与结果保留，辅助信息使用灰色。')
       }
       result.push('')
     }
@@ -246,33 +239,33 @@ export class DockPreview implements Component, Focusable {
   }
 
   #footer(width: number): string[] {
-    const status = this.#scene === 'permission' ? 'permission required' : 'ready'
+    const status = this.#scene === 'permission' ? 'approval needed' : 'ready'
     const size =
       this.#effectiveLogoRows === this.#logoRows
-        ? `logo ${this.#logoRows} rows`
-        : `logo ${this.#effectiveLogoRows}/${this.#logoRows} rows (fitted)`
+        ? `${this.#logoRows} rows`
+        : `${this.#effectiveLogoRows}/${this.#logoRows} rows (fitted)`
+    const left = dim(`${status} · No backend`)
     const input =
       this.#scene === 'permission'
-        ? `❯ ${dim('Waiting for approval…')}`
-        : (this.#input.render(width)[0] ?? '> ').replace(/^>/, '❯')
+        ? accent('› ') + dim('Waiting for approval…')
+        : (this.#input.render(width)[0] ?? '> ').replace(/^>/, accent('›'))
     const rows = [
-      dim(`${status} · No backend`) +
-        ' '.repeat(Math.max(1, width - status.length - 14 - size.length)) +
-        dim(size),
+      left + ' '.repeat(Math.max(1, width - visibleWidth(left) - size.length)) + dim(size),
       dim('─'.repeat(width)),
       input,
-      dim('─'.repeat(width)),
-      dim('F1 Start  F2 Chat  F3 Permission  F4 Logo'),
-      dim('Ctrl+C Exit  ·  Preview only'),
+      dim('/compact  /tasks  /subtask'),
+      '',
+      dim('F1 start  F2 chat  F3 permission  F4 icon'),
+      dim('Ctrl+C exit · preview'),
     ]
     if (this.#scene === 'permission') {
-      rows.push('', accent('Allow this edit?'), dim('Main agent · Edit · src/ui/themes.ts'))
+      rows.push('', accent('Allow this edit?'), dim('Main agent · Edit · src/ui/themes.ts'), '')
       for (const [i, label] of [
         'Allow once',
         'Allow this call for this session',
         'Deny',
       ].entries()) {
-        const line = `${(i === this.#choice ? '❯ ' : '  ') + (i + 1)}. ${label}`
+        const line = `${(i === this.#choice ? '› ' : '  ') + (i + 1)}. ${label}`
         rows.push(i === this.#choice ? accent(line) : dim(line))
       }
     }
@@ -305,6 +298,6 @@ export function startTuiPreview(options: { terminal?: Terminal; onStop?: () => v
     return undefined
   })
   tui.start()
-  terminal.setTitle('Dock UI Preview')
+  terminal.setTitle('Dock UI Preview v2')
   return { tui, preview, stop }
 }
