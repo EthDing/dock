@@ -25,6 +25,7 @@
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome lint .",
+    "preview:tui": "tsx scripts/preview-tui.mts",
     "test": "vitest run && pnpm --filter @dock/tui test",
     "test:sandbox": "DOCK_SANDBOX_INTEGRATION=1 vitest run test/sandbox/sandbox-integration.test.ts",
     "test:watch": "vitest",

@@ -69,6 +69,13 @@ Startup session flags include `--continue`, `--resume <id|name>`, `--fork-sessio
 
 ## Interactive controls
 
+For a frontend-only terminal preview, run `pnpm preview:tui` from this repository in WSL.
+This uses the actual `@dock/tui` renderer, not the Dock agent or a browser mockup. No provider,
+credential, session, sandbox or tool executor is initialized. F1/F2/F3 select startup/conversation/
+permission examples; F4 cycles a mascot drawn in exactly 3, 5 or 7 character rows. Enter plays
+fixed sample content, and Ctrl+C exits. A short terminal selects a smaller complete mascot.
+This preview is not yet the production UI. See [preview internals](docs/internals/ui-preview.md).
+
 - `Esc` interrupts the active turn; press `Esc` twice on an empty editor to open rewind.
 - `Shift+Tab` cycles the normal permission modes. `Ctrl+C` exits while idle.
 - `/resume`, `/branch`, `/clear`, and `/rename` manage sessions without restarting Dock.
