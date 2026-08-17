@@ -6,7 +6,7 @@ import {
   type PermissionMode,
   type PermissionRules,
 } from './evaluate-permission.js'
-import type { PermissionApproval } from './permission-broker.js'
+import type { PermissionApproval, PermissionCallIdentity } from './permission-broker.js'
 import type { SessionPermissionState } from './session-permission-state.js'
 
 export function createCanUseTool(options: {
@@ -19,6 +19,7 @@ export function createCanUseTool(options: {
     input: JsonObject,
     decision: PermissionDecision,
     signal: AbortSignal,
+    identity: PermissionCallIdentity,
   ) => Promise<PermissionApproval>
   rules: PermissionRules
   persistApproval?: (rule: string) => Promise<void>
@@ -57,7 +58,17 @@ export function createCanUseTool(options: {
       return { behavior: 'allow', updatedInput: decisionInput }
     }
 
-    const approval = await options.requestApproval(tool, decisionInput, decision, execution.signal)
+    const approval = await options.requestApproval(
+      tool,
+      decisionInput,
+      decision,
+      execution.signal,
+      {
+        sessionId: execution.agent?.sessionId,
+        toolUseId: execution.toolUseId,
+        parentMessageUuid: execution.parentMessageUuid,
+      },
+    )
     if (approval.behavior === 'allow_session' || approval.behavior === 'allow_always') {
       options.sessionPermissions?.allow(tool, decisionInput)
     }

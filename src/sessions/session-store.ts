@@ -1,3 +1,4 @@
+import { buildDisplayHistory } from './display-history.js'
 import { createHash, type UUID } from 'node:crypto'
 import { type FileHandle, mkdir, open, readFile, unlink, rmdir } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
@@ -78,6 +79,7 @@ export type SessionRecord =
   | SessionToolResultClearRecord
 
 export type LoadedSession = {
+  displayMessages: readonly TranscriptMessage[]
   fileHistorySnapshots: readonly FileHistorySnapshot[]
   headUuid: UUID | null
   messages: readonly TranscriptMessage[]
@@ -381,6 +383,7 @@ export async function loadSession(location: SessionLocation): Promise<LoadedSess
 
   const { headUuid, messages } = buildActiveConversation(records)
   return {
+    displayMessages: buildDisplayHistory(records),
     fileHistorySnapshots: collectFileHistorySnapshots(records),
     headUuid,
     messages,

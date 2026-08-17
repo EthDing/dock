@@ -1,6 +1,6 @@
+import type { UiEvent, SessionViewInfo } from './contracts.js'
 import type { AgentSnapshot, AgentView } from '../agents/types.js'
 import { Editor, Key, Markdown, matchesKey, SelectList, Spacer, Text, type TUI } from '@dock/tui'
-import type { AgentEvent } from '../agent/run-agent-loop.js'
 import type {
   MemoryNotification,
   MemoryNotificationBroker,
@@ -23,10 +23,12 @@ import { editorTheme, markdownTheme, selectListTheme } from './themes.js'
 
 export type DockUiController = {
   getSnapshot?: () => AgentSnapshot
-  processNotifications?: () => AsyncIterable<AgentEvent>
+  processNotifications?: () => AsyncIterable<UiEvent>
+  getViewInfo?: () => SessionViewInfo
+  displayMessages?: readonly TranscriptMessage[]
   abort: (reason?: unknown) => void
   close: () => Promise<void>
-  submit: (text: string) => AsyncIterable<AgentEvent>
+  submit: (text: string) => AsyncIterable<UiEvent>
   compact?: (instructions?: string) => Promise<void>
   contextSummary?: () => string
   permissionMode?: string
@@ -323,7 +325,7 @@ export class DockTuiApp {
     await this.#renderRun(this.#controller.submit(trimmed))
   }
 
-  async #renderRun(events: AsyncIterable<AgentEvent>): Promise<void> {
+  async #renderRun(events: AsyncIterable<UiEvent>): Promise<void> {
     this.#busy = true
     this.#editor.disableSubmit = false
     this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · working`)

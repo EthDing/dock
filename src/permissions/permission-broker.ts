@@ -1,9 +1,16 @@
+import type { UUID } from 'node:crypto'
+import type { SessionId } from '../sessions/ids.js'
 import type { JsonObject } from '../model/types.js'
 import type { PermissionDecision } from './evaluate-permission.js'
 import type { AgentTool } from '../tools/types.js'
 
 export type PermissionRequester = { agentId: string; label: string }
-export type PermissionRequest = {
+export type PermissionCallIdentity = {
+  sessionId?: SessionId | undefined
+  toolUseId?: string | undefined
+  parentMessageUuid?: UUID | undefined
+}
+export type PermissionRequest = PermissionCallIdentity & {
   decision: PermissionDecision
   input: JsonObject
   signal: AbortSignal
@@ -28,6 +35,7 @@ export class PermissionBroker {
     decision: PermissionDecision,
     signal: AbortSignal,
     requester?: PermissionRequester,
+    identity?: PermissionCallIdentity,
   ): Promise<PermissionApproval> {
     if (signal.aborted) return { behavior: 'deny' }
     let onAbort!: () => void
@@ -38,6 +46,7 @@ export class PermissionBroker {
     const job = this.#tail.then(async (): Promise<PermissionApproval> => {
       if (signal.aborted) return { behavior: 'deny' }
       const approval = this.#handler?.({
+        ...identity,
         tool,
         input,
         decision,

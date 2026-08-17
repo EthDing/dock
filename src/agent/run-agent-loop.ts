@@ -42,6 +42,9 @@ export type AgentLoopOptions = {
   userContext?: Readonly<Record<string, string>>
 }
 
+export type ToolOutcome = 'success' | 'error' | 'denied' | 'aborted'
+type ToolExecutionResult = { result: ToolResultBlock; outcome: ToolOutcome }
+
 export type AgentEvent =
   | {
       type: 'tool_results_cleared'
@@ -54,7 +57,7 @@ export type AgentEvent =
   | { type: 'assistant_message'; message: AssistantTranscriptMessage }
   | { type: 'user_message'; message: UserTranscriptMessage }
   | { type: 'tool_execution_start'; toolUse: ToolUseBlock }
-  | { type: 'tool_result'; result: ToolResultBlock }
+  | { type: 'tool_result'; result: ToolResultBlock; outcome?: ToolOutcome }
 
 export type AgentLoopResult = {
   reason: 'aborted' | 'completed' | 'max_turns' | 'model_error'
@@ -184,7 +187,7 @@ export async function* runAgentLoop(
           yield { type: 'tool_execution_start', toolUse }
         }
 
-        let batchResults: ToolResultBlock[]
+        let batchResults: ToolExecutionResult[]
         if (controller.signal.aborted) {
           batchResults = batch.toolUses.map(abortedToolResult)
         } else if (batch.isConcurrencySafe) {
@@ -233,9 +236,9 @@ export async function* runAgentLoop(
           ]
         }
 
-        for (const result of batchResults) {
+        for (const { result, outcome } of batchResults) {
           toolResults.push(result)
-          yield { type: 'tool_result', result }
+          yield { type: 'tool_result', result, outcome }
         }
       }
 
@@ -250,12 +253,15 @@ export async function* runAgentLoop(
   }
 }
 
-function abortedToolResult(toolUse: ToolUseBlock): ToolResultBlock {
+function abortedToolResult(toolUse: ToolUseBlock): ToolExecutionResult {
   return {
-    content: 'Tool execution aborted',
-    isError: true,
-    toolUseId: toolUse.id,
-    type: 'tool_result',
+    outcome: 'aborted',
+    result: {
+      content: 'Tool execution aborted',
+      isError: true,
+      toolUseId: toolUse.id,
+      type: 'tool_result',
+    },
   }
 }
 
@@ -300,7 +306,7 @@ async function executeToolUse(
   parentMessageUuid: UUID,
   canUseTool?: CanUseTool,
   agent?: AgentSnapshot,
-): Promise<ToolResultBlock> {
+): Promise<ToolExecutionResult> {
   const tool = tools.find((candidate) => candidate.name === toolUse.name)
   let result: AgentToolResult
 
@@ -314,10 +320,13 @@ async function executeToolUse(
       parsedInput = tool.parseInput?.(toolUse.input) ?? toolUse.input
     } catch (error) {
       return {
-        content: `Invalid input for ${tool.name}: ${error instanceof Error ? error.message : String(error)}`,
-        isError: true,
-        toolUseId: toolUse.id,
-        type: 'tool_result',
+        outcome: 'error',
+        result: {
+          content: `Invalid input for ${tool.name}: ${error instanceof Error ? error.message : String(error)}`,
+          isError: true,
+          toolUseId: toolUse.id,
+          type: 'tool_result',
+        },
       }
     }
     const decision = await canUseTool?.(tool, parsedInput, {
@@ -328,10 +337,13 @@ async function executeToolUse(
     })
     if (decision?.behavior === 'deny') {
       return {
-        content: decision.message,
-        isError: true,
-        toolUseId: toolUse.id,
-        type: 'tool_result',
+        outcome: signal.aborted ? 'aborted' : 'denied',
+        result: {
+          content: decision.message,
+          isError: true,
+          toolUseId: toolUse.id,
+          type: 'tool_result',
+        },
       }
     }
     try {
@@ -353,9 +365,12 @@ async function executeToolUse(
   }
 
   return {
-    content: result.content,
-    ...(result.isError === undefined ? {} : { isError: result.isError }),
-    toolUseId: toolUse.id,
-    type: 'tool_result',
+    outcome: signal.aborted ? 'aborted' : result.isError ? 'error' : 'success',
+    result: {
+      content: result.content,
+      ...(result.isError === undefined ? {} : { isError: result.isError }),
+      toolUseId: toolUse.id,
+      type: 'tool_result',
+    },
   }
 }

@@ -40,3 +40,17 @@ describe('RuntimeController', () => {
     expect(runtime.permissionMode).toBe('plan')
   })
 })
+it.each(['completed', 'aborted', 'model_error'] as const)(
+  'preserves the %s terminal result for the UI',
+  async (reason) => {
+    const session = createSession('test')
+    session.submit = async function* () {
+      yield* []
+      return { reason, messages: [], ...(reason === 'model_error' ? { error: 'offline' } : {}) }
+    }
+    const runtime = new RuntimeController(session),
+      events = []
+    for await (const event of runtime.submit('hi')) events.push(event)
+    expect(events.at(-1)).toMatchObject({ type: 'turn_end', result: { reason } })
+  },
+)

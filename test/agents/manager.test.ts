@@ -611,3 +611,38 @@ it('carries foreground descendants of a background parent across clear', async (
     await manager.close()
   }
 })
+it('publishes isolated session/run-scoped progress without altering execution or notifications', async () => {
+  const manager = await setup({
+    async *stream() {
+      yield* response('safe result')
+    },
+  })
+  const p = parent(),
+    updates: unknown[] = []
+  manager.subscribeUi(p.sessionId, (update) => {
+    update.agent.report = 'tampered'
+    throw Error('bad observer')
+  })
+  const unsubscribe = manager.subscribeUi(p.sessionId, (update) => updates.push(update))
+  const agent = await manager.spawn(p, { prompt: 'task', description: 'task' })
+  expect((await manager.wait(agent.id)).report).toBe('safe result')
+  expect(
+    updates.some(
+      (update) => (update as { event?: { type: string } }).event?.type === 'model_stream',
+    ),
+  ).toBe(true)
+  expect(
+    updates.every(
+      (update) =>
+        (update as { sessionId: string; runId: string }).sessionId === p.sessionId &&
+        (update as { runId: string }).runId,
+    ),
+  ).toBe(true)
+  expect(await manager.pendingNotifications(p.sessionId)).toHaveLength(1)
+  unsubscribe()
+  const count = updates.length
+  await manager.send(p.sessionId, agent.id, 'again')
+  await manager.wait(agent.id)
+  expect(updates).toHaveLength(count)
+  await manager.close()
+})

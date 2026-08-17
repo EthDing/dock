@@ -371,8 +371,8 @@ export async function startDock(options: StartDockOptions): Promise<void> {
         }),
       mode: () => permissionModeState.value,
       persistApproval,
-      requestApproval: (tool, input, decision, signal) =>
-        permissionBroker.requestApproval(tool, input, decision, signal),
+      requestApproval: (tool, input, decision, signal, identity) =>
+        permissionBroker.requestApproval(tool, input, decision, signal, undefined, identity),
       rules: permissionRules,
       sessionPermissions: policy.sessionPermissions,
     })
@@ -416,7 +416,8 @@ export async function startDock(options: StartDockOptions): Promise<void> {
           memory,
           model,
           modelId,
-          onSaved: (paths) => memoryNotificationBroker.notify({ paths, type: 'saved' }),
+          onSaved: (paths) =>
+            memoryNotificationBroker.notify({ paths, type: 'saved', sessionId: targetSessionId }),
           systemPrompt,
           tools: extractorTools,
           ...(Object.keys(userContext).length > 0 ? { userContext } : {}),
@@ -440,6 +441,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       contextManager,
       fileHistory,
       initialMessages: existing?.messages ?? [],
+      initialDisplayMessages: existing?.displayMessages ?? [],
       ...(provider.maxOutputTokens ? { maxOutputTokens: provider.maxOutputTokens } : {}),
       model,
       modelId,

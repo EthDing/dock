@@ -1,4 +1,6 @@
+import type { SessionId } from '../sessions/ids.js'
 export type MemoryNotification = {
+  sessionId?: SessionId
   paths: readonly string[]
   type: 'saved'
 }

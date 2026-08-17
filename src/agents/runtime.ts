@@ -133,11 +133,18 @@ export async function createSubagentRuntime(options: {
           ...(typeof args.command === 'string' ? { command: args.command } : {}),
           dangerouslyDisableSandbox: args.dangerouslyDisableSandbox === true,
         }),
-      requestApproval: (tool, input, decision, signal) =>
-        options.permissionBroker.requestApproval(tool, input, decision, signal, {
-          agentId: meta.id,
-          label: meta.name ?? meta.description,
-        }),
+      requestApproval: (tool, input, decision, signal, identity) =>
+        options.permissionBroker.requestApproval(
+          tool,
+          input,
+          decision,
+          signal,
+          {
+            agentId: meta.id,
+            label: meta.name ?? meta.description,
+          },
+          identity,
+        ),
     })(tool, input, execution)
   }
   const contextManager = new ContextManager({

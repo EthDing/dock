@@ -1,6 +1,6 @@
 import { randomUUID, type UUID } from 'node:crypto'
 import { resolve } from 'node:path'
-import { runAgentLoop, type AgentLoopResult } from '../agent/run-agent-loop.js'
+import { runAgentLoop, type AgentLoopResult, type AgentEvent } from '../agent/run-agent-loop.js'
 import type { ContextManager } from '../context/context-manager.js'
 import {
   createUserMessage,
@@ -14,7 +14,13 @@ import { FileReadState } from '../tools/file-read-state.js'
 import type { AgentTool, CanUseTool } from '../tools/types.js'
 import { buildChildContext, sanitizeAgentReport } from './context.js'
 import { AgentStore, type AgentIndex, type AgentMessageOptions } from './store.js'
-import type { AgentMetadata, AgentSnapshot, AgentSpawnInput, AgentView } from './types.js'
+import type {
+  AgentMetadata,
+  AgentSnapshot,
+  AgentSpawnInput,
+  AgentView,
+  AgentUiUpdate,
+} from './types.js'
 import { AgentWorktrees } from './worktrees.js'
 
 export type SubagentRuntime = {
@@ -52,6 +58,11 @@ export class SubagentManager {
   readonly #actors = new Map<UUID, Actor>()
   readonly #roots = new Map<SessionId, Promise<AgentIndex>>()
   readonly #worktrees = new AgentWorktrees()
+  readonly #uiListeners = new Set<{
+    sessionId: SessionId
+    listener: (update: AgentUiUpdate) => void
+  }>()
+  #uiSequence = 0
   #closed = false
   #wake: ((sessionId: SessionId) => void) | undefined
   constructor(options: ManagerOptions) {
@@ -62,6 +73,36 @@ export class SubagentManager {
     this.#wake = handler
   }
 
+  subscribeUi(sessionId: SessionId, listener: (update: AgentUiUpdate) => void): () => void {
+    const subscription = { sessionId, listener }
+    this.#uiListeners.add(subscription)
+    return () => {
+      this.#uiListeners.delete(subscription)
+    }
+  }
+  #publish(actor: Actor, event?: AgentEvent): void {
+    const sequence = ++this.#uiSequence
+    const safeEvent =
+      event?.type === 'compact' ? { type: 'compact' as const, messages: event.messages } : event
+    for (const subscription of this.#uiListeners) {
+      if (subscription.sessionId !== actor.meta.sessionId) continue
+      try {
+        const returned = subscription.listener(
+          structuredClone({
+            sessionId: actor.meta.sessionId,
+            agentId: actor.meta.id,
+            runId: actor.meta.runId,
+            sequence,
+            agent: this.#view(actor),
+            ...(safeEvent ? { event: safeEvent } : {}),
+          }),
+        ) as unknown
+        if (returned instanceof Promise) void returned.catch(() => {})
+      } catch {
+        /* Rendering observers cannot change the worker lifecycle. */
+      }
+    }
+  }
   isOutputPath(sessionId: SessionId, path: string): boolean {
     return [...this.#actors.values()].some(
       (actor) =>
@@ -108,12 +149,16 @@ export class SubagentManager {
   async snapshot(
     sessionId: SessionId,
     id: string,
-  ): Promise<{ agent: AgentView; messages: readonly TranscriptMessage[] }> {
+  ): Promise<{
+    agent: AgentView
+    messages: readonly TranscriptMessage[]
+    sequence: number
+    runId: UUID
+  }> {
     const actor = await this.#resolve(sessionId, id)
-    const messages = actor.messages.length
-      ? actor.messages
-      : (await loadSession(this.#store.location(actor.meta))).messages
-    return { agent: this.#view(actor), messages }
+    const sequence = this.#uiSequence
+    const messages = (await loadSession(this.#store.location(actor.meta))).displayMessages
+    return { agent: this.#view(actor), messages, sequence, runId: actor.meta.runId }
   }
   async spawn(
     parent: AgentSnapshot,
@@ -388,6 +433,7 @@ export class SubagentManager {
   }
   async close(): Promise<void> {
     this.#closed = true
+    this.#uiListeners.clear()
     this.#wake = undefined
     for (const actor of this.#actors.values())
       if (actor.running) {
@@ -423,6 +469,7 @@ export class SubagentManager {
   async #save(actor: Actor): Promise<void> {
     actor.meta.updatedAt = new Date().toISOString()
     await this.#store.save(actor.meta)
+    this.#publish(actor)
   }
   async #resolve(sessionId: SessionId, to: string, fromAgentId?: UUID): Promise<Actor> {
     const index = await this.#root(sessionId)
@@ -565,6 +612,7 @@ export class SubagentManager {
         let next = await loop.next()
         while (!next.done) {
           const event = next.value
+          this.#publish(actor, event)
           if (event.type === 'model_stream') {
             if (event.event.type === 'message_start') partialText = ''
             else if (

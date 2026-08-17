@@ -1,3 +1,4 @@
+import type { SessionViewInfo } from './ui/contracts.js'
 import type { AgentSnapshot } from './agents/types.js'
 import type { UserTranscriptMessage } from './messages/create-message.js'
 import type { UUID } from 'node:crypto'
@@ -35,6 +36,7 @@ export class SessionController {
   readonly #permissionModeState: PermissionModeState | undefined
   readonly #turnComplete: TurnCompleteWork | undefined
   #messages: TranscriptMessage[]
+  #displayMessages: TranscriptMessage[]
   #activeAbortController: AbortController | undefined
   #closed = false
   #activeDone: Promise<void> | undefined
@@ -53,6 +55,7 @@ export class SessionController {
     contextManager?: ContextManager
     fileHistory: FileHistory
     initialMessages?: readonly TranscriptMessage[]
+    initialDisplayMessages?: readonly TranscriptMessage[]
     maxOutputTokens?: number
     model: ModelAdapter
     modelId: string
@@ -69,6 +72,7 @@ export class SessionController {
     this.#contextManager = options.contextManager
     this.#fileHistory = options.fileHistory
     this.#messages = [...(options.initialMessages ?? [])]
+    this.#displayMessages = [...(options.initialDisplayMessages ?? options.initialMessages ?? [])]
     this.#maxOutputTokens = options.maxOutputTokens
     this.#model = options.model
     this.#modelId = options.modelId
@@ -84,6 +88,23 @@ export class SessionController {
     return this.#messages
   }
 
+  get displayMessages(): readonly TranscriptMessage[] {
+    return this.#displayMessages
+  }
+  getViewInfo(): SessionViewInfo {
+    const identity = this.#identity?.()
+    return {
+      sessionId: identity?.sessionId,
+      cwd: identity?.cwd ?? '',
+      modelReference: identity?.modelReference ?? this.#modelId,
+      permissionMode: this.permissionMode,
+      contextSummary: this.contextSummary(),
+    }
+  }
+  #appendDisplay(messages: readonly TranscriptMessage[]): void {
+    const known = new Set(this.#displayMessages.map((m) => m.uuid))
+    this.#displayMessages.push(...messages.filter((m) => !known.has(m.uuid)))
+  }
   getSnapshot(): AgentSnapshot {
     if (!this.#identity) throw new Error('Agent identity is unavailable')
     return {
@@ -119,6 +140,8 @@ export class SessionController {
         await this.#fileHistory.makeSnapshot(userMessage.uuid)
         this.#messages.push(userMessage)
         await this.#writer.recordTranscript([userMessage])
+        this.#appendDisplay([userMessage])
+        yield { type: 'user_message', message: userMessage }
       }
       generator = runAgentLoop({
         ...(this.#canUseTool ? { canUseTool: this.#canUseTool } : {}),
@@ -145,12 +168,14 @@ export class SessionController {
         const event = next.value
         if (event.type === 'assistant_message' || event.type === 'user_message') {
           await this.#writer.recordTranscript([event.message])
+          this.#appendDisplay([event.message])
           if (!this.#messages.some((m) => m.uuid === event.message.uuid))
             this.#messages.push(event.message)
           if (event.type === 'user_message' && event.message.agentEventKey)
             await this.#inbox?.ack([event.message.uuid])
         } else if (event.type === 'compact') {
           await this.#writer.recordCompaction(event.messages, event.compaction)
+          this.#appendDisplay(event.messages)
           this.#messages = [...event.messages]
           if (event.compaction?.userContext !== undefined)
             this.#userContext = event.compaction.userContext
@@ -220,6 +245,7 @@ export class SessionController {
       abort.signal.throwIfAborted()
       const messages = buildPostCompactMessages(result)
       await this.#writer.recordCompaction(messages, result)
+      this.#appendDisplay(messages)
       result.commit()
       this.#messages = [...messages]
       if (result.userContext !== undefined) this.#userContext = result.userContext
@@ -267,6 +293,9 @@ export class SessionController {
       const index = this.#messages.findIndex((message) => message.uuid === targetUuid)
       if (index < 0) throw new Error(`Message ${targetUuid} is not in the active conversation`)
       this.#messages = this.#messages.slice(0, index + 1)
+      const displayIndex = this.#displayMessages.findIndex((m) => m.uuid === targetUuid)
+      if (displayIndex >= 0)
+        this.#displayMessages = this.#displayMessages.slice(0, displayIndex + 1)
     }
   }
 

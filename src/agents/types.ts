@@ -1,3 +1,4 @@
+import type { AgentEvent } from '../agent/run-agent-loop.js'
 import type { UUID } from 'node:crypto'
 import type { TranscriptMessage, UserTranscriptMessage } from '../messages/create-message.js'
 import type { ModelToolDefinition, Usage } from '../model/types.js'
@@ -76,3 +77,11 @@ export type AgentView = Pick<
   | 'stoppedBy'
   | 'worktree'
 > & { outputFile: string }
+export type AgentUiUpdate = {
+  sessionId: SessionId
+  agentId: UUID
+  runId: UUID
+  sequence: number
+  agent: AgentView
+  event?: AgentEvent
+}
