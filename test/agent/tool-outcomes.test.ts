@@ -9,7 +9,7 @@ it.each(['success', 'error', 'denied', 'aborted'] as const)(
     let calls = 0
     const model: ModelAdapter = {
       async *stream() {
-        yield { type: 'message_start', messageId: 'm' + calls }
+        yield { type: 'message_start', messageId: `m${calls}` }
         if (calls++ === 0) {
           yield {
             type: 'content_block_start',

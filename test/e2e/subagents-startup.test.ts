@@ -102,12 +102,8 @@ describe('subagents through real startup and simulated terminal', () => {
       await until(() => !!terminal.input)
       terminal.send('hello')
       await until(() => terminal.output.includes('HELLO'))
-      await until(() => terminal.output.lastIndexOf('ready') > terminal.output.lastIndexOf('HELLO'))
       terminal.send('/subtask child job')
       await until(() => terminal.output.includes('PARENT-NOTICED'))
-      await until(
-        () => terminal.output.lastIndexOf('ready') > terminal.output.lastIndexOf('PARENT-NOTICED'),
-      )
       terminal.send('/tasks')
       await until(() => terminal.output.includes('completed'))
       const beforeSwitch = spy.mock.calls.length

@@ -64,6 +64,9 @@ export type AgentMetadata = {
 export type AgentView = Pick<
   AgentMetadata,
   | 'id'
+  | 'cwd'
+  | 'modelReference'
+  | 'runId'
   | 'sessionId'
   | 'parentAgentId'
   | 'depth'

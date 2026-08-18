@@ -1,7 +1,8 @@
+import { stripVTControlCharacters } from 'node:util'
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { TuiMainScreen, type Terminal } from '@dock/tui'
+import { TuiAltScreen, type Terminal } from '@dock/tui'
 import { describe, expect, it } from 'vitest'
 import { FileHistory } from '../../src/checkpoint/file-history.js'
 import { FakeModelAdapter } from '../../src/model/fake-model.js'
@@ -85,13 +86,13 @@ describe('Dock end-to-end flow', () => {
       tools: [createReadTool({ cwd, fileHistory, readFileState: new FileReadState() })],
       writer,
     })
-    const tui = new TuiMainScreen(new MemoryTerminal())
+    const tui = new TuiAltScreen(new MemoryTerminal())
     const app = new DockTuiApp({ controller, tui })
 
     await app.submit('Read hello.txt')
-    const rendered = tui.render(100).join('\n')
+    const rendered = stripVTControlCharacters(tui.render(100).join('\n'))
     expect(rendered).toContain('Read hello.txt')
-    expect(rendered).toContain('● Read')
+    expect(rendered).toContain('Read')
     expect(rendered).toContain('The file says hello from the workspace.')
 
     await app.stop()

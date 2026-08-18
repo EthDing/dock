@@ -340,6 +340,8 @@ export class Editor implements Component, Focusable {
 
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
+	private visibleLineLimit: number | undefined;
+	setMaxVisibleLines(limit: number): void { this.visibleLineLimit = Math.max(1, Math.floor(limit)); }
 	public disableSubmit: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
@@ -498,7 +500,7 @@ export class Editor implements Component, Focusable {
 
 		// Calculate max visible lines: 30% of terminal height, minimum 5 lines
 		const terminalRows = this.tui.terminal.rows;
-		const maxVisibleLines = Math.max(5, Math.floor(terminalRows * 0.3));
+		const maxVisibleLines = this.visibleLineLimit ?? Math.max(5, Math.floor(terminalRows * 0.3));
 
 		// Find the cursor line index in layoutLines
 		let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor);

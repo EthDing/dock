@@ -232,6 +232,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return this.getPrimaryScrollView().isFollowingEnd;
 	}
 
+	get isSearching(): boolean { return Boolean(this.activeSearch); }
+	get hasTextSelection(): boolean { return this.getSelectionBounds() !== undefined; }
+	copySelectedText(): Promise<void> { return this.copySelectionToClipboard(); }
 	setLayoutRoot(component: Component | undefined): void {
 		if (this.layoutRoot === component) return;
 		this.layoutRoot = component;
@@ -420,7 +423,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 	}
 
-	private openSearch(): void {
+	openSearch(): void {
 		if (this.activeSearch) {
 			this.activeSearch.overlay?.focus();
 			return;

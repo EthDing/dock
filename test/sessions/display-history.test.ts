@@ -49,13 +49,13 @@ describe('display history independent of model context', () => {
     const staged = summary('uncommitted')
     await appendFile(
       getSessionPath(location),
-      JSON.stringify({
+      `${JSON.stringify({
         ...staged,
         compactionId: staged.uuid,
         parentUuid: null,
         sessionId: location.sessionId,
         cwd: location.cwd,
-      }) + '\n',
+      })}\n`,
     )
     expect((await loadSession(location)).displayMessages.map((m) => m.uuid)).toEqual([
       first.uuid,
@@ -71,7 +71,7 @@ describe('display history independent of model context', () => {
     await writer.close()
     await appendFile(
       getSessionPath(location),
-      [
+      `${[
         JSON.stringify({
           ...compact,
           parentUuid: null,
@@ -84,7 +84,7 @@ describe('display history independent of model context', () => {
           preservedUuids: [tail.uuid],
           timestamp: new Date().toISOString(),
         }),
-      ].join('\n') + '\n',
+      ].join('\n')}\n`,
     )
     const loaded = await loadSession(location)
     expect(loaded.messages).toEqual([compact, tail])

@@ -451,6 +451,9 @@ export class SubagentManager {
     const m = actor.meta
     return {
       id: m.id,
+      cwd: m.cwd,
+      modelReference: m.modelReference,
+      runId: m.runId,
       sessionId: m.sessionId,
       parentAgentId: m.parentAgentId,
       depth: m.depth,

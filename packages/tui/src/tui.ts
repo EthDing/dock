@@ -309,7 +309,7 @@ export interface TUI extends Component {
 	stop(options?: TuiStopOptions): void;
 	renderNow(force?: boolean): void;
 	requestRender(force?: boolean): void;
-	addInputListener(listener: TuiInputListener): () => void;
+	addInputListener(listener: TuiInputListener, options?: { prepend?: boolean }): () => void;
 	removeInputListener(listener: TuiInputListener): void;
 	onTerminalColorSchemeChange(listener: (scheme: TerminalColorScheme) => void): () => void;
 	setTerminalColorSchemeNotifications(enabled: boolean): void;
@@ -711,8 +711,9 @@ export abstract class TuiBase extends Container implements TUI {
 		this.requestRender();
 	}
 
-	addInputListener(listener: TuiInputListener): () => void {
-		this.inputListeners.add(listener);
+	addInputListener(listener: TuiInputListener, options: { prepend?: boolean } = {}): () => void {
+		if (options.prepend) this.inputListeners = new Set([listener, ...this.inputListeners]);
+		else this.inputListeners.add(listener);
 		return () => {
 			this.inputListeners.delete(listener);
 		};

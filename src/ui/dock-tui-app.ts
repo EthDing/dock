@@ -1,12 +1,15 @@
-import type { UiEvent, SessionViewInfo } from './contracts.js'
-import type { AgentSnapshot, AgentView } from '../agents/types.js'
-import { Editor, Key, Markdown, matchesKey, SelectList, Spacer, Text, type TUI } from '@dock/tui'
-import type {
-  MemoryNotification,
-  MemoryNotificationBroker,
-} from '../memory/memory-notification-broker.js'
+import type { UUID } from 'node:crypto'
+import {
+  type Component,
+  Editor,
+  Key,
+  matchesKey,
+  type TuiAltScreen,
+  type TuiInputListenerResult,
+} from '@dock/tui'
+import type { AgentSnapshot, AgentUiUpdate, AgentView } from '../agents/types.js'
+import type { MemoryNotificationBroker } from '../memory/memory-notification-broker.js'
 import type { TranscriptMessage } from '../messages/create-message.js'
-import type { ToolUseBlock } from '../model/types.js'
 import type { PermissionMode } from '../permissions/evaluate-permission.js'
 import type {
   PermissionApproval,
@@ -19,7 +22,16 @@ import type {
   SandboxNetworkRequest,
   SandboxNetworkResponse,
 } from '../sandbox/network-permission-broker.js'
-import { editorTheme, markdownTheme, selectListTheme } from './themes.js'
+import { CommandRegistry } from './commands.js'
+import { Brand, type LogoRows } from './components/brand.js'
+import { FullscreenView } from './components/fullscreen-view.js'
+import { type Choice, InteractionPanel } from './components/interaction-panel.js'
+import { TaskList } from './components/task-list.js'
+import { TranscriptView } from './components/transcript.js'
+import type { SessionViewInfo, UiEvent } from './contracts.js'
+import { muted, safeText } from './presentation.js'
+import { editorTheme } from './themes.js'
+import { TranscriptState } from './transcript-state.js'
 
 export type DockUiController = {
   getSnapshot?: () => AgentSnapshot
@@ -61,7 +73,13 @@ export type DockSandboxCommands = {
 export type DockAgentCommands = {
   list: () => Promise<AgentView[]>
   launch: (prompt: string) => Promise<AgentView>
-  snapshot: (id: string) => Promise<{ agent: AgentView; messages: readonly TranscriptMessage[] }>
+  snapshot: (id: string) => Promise<{
+    agent: AgentView
+    messages: readonly TranscriptMessage[]
+    sequence?: number
+    runId?: string
+  }>
+  subscribe?: (listener: (update: AgentUiUpdate) => void) => () => void
   stop: (id: string) => Promise<AgentView>
   send: (id: string, text: string) => Promise<unknown>
   background: () => Promise<void>
@@ -70,738 +88,799 @@ export type DockAgentCommands = {
 
 export class DockTuiApp {
   readonly #controller: DockUiController
+  readonly #tui: TuiAltScreen
   readonly #editor: Editor
-  readonly #status: Text
-  readonly #tui: TUI
+  readonly #screen: FullscreenView
+  readonly #commands = new CommandRegistry()
   readonly #sessionCommands: DockSessionCommands | undefined
   readonly #sandboxCommands: DockSandboxCommands | undefined
-  readonly #permissionCycle: PermissionMode[]
-  readonly #queue: string[] = []
-  readonly #stopped: Promise<void>
-  readonly #resolveStopped: () => void
-  readonly #agentCommands: DockAgentCommands | undefined
-  #closing = false
-  #pendingTasks = false
-  readonly #cancelModals = new Set<() => void>()
-  #modal = 0
-  #modalTail: Promise<unknown> = Promise.resolve()
+  readonly #agents: DockAgentCommands | undefined
+  readonly #preview: { logoRows?: () => LogoRows; helper?: string | (() => string) } | undefined
+  #main: TranscriptState
+  #mainView: TranscriptView
+  #child: TranscriptState | undefined
+  #childView: TranscriptView | undefined
+  #activeAgent: AgentView | undefined
+  #activeRun: string | undefined
+  #taskList: TaskList | undefined
+  #panel: InteractionPanel | undefined
+  #panelCount = 0
+  #panelTail: Promise<unknown> = Promise.resolve()
+  #cancelPanel: (() => void) | undefined
+  #unsubscribe: (() => void) | undefined
+  #generation = 0
+  #viewTicket = 0
+  #snapshotBuffer: { id: string; updates: AgentUiUpdate[] } | undefined
+  readonly #endedRuns = new Set<string>()
+  readonly #drafts = new Map<string, string>()
+  readonly #queue: Array<{ text: string; target?: string }> = []
   #busy = false
-  #lastEscapeAt = 0
+  #mainTask: Promise<void> | undefined
+  #closing = false
+  #pendingNotifications = false
+  #refreshTimer: ReturnType<typeof setTimeout> | undefined
+  #lastEscape = 0
+  #resolveStopped!: () => void
+  readonly #stopped: Promise<void>
+  readonly #brand: Brand
+  readonly #mainBody: Component
+  readonly #childBody: Component
 
   constructor(options: {
     controller: DockUiController
+    tui: TuiAltScreen
     agentCommands?: DockAgentCommands
-    memoryNotificationBroker?: MemoryNotificationBroker
+    sessionCommands?: DockSessionCommands
+    sandboxCommands?: DockSandboxCommands
     permissionBroker?: PermissionBroker
     sandboxNetworkPermissionBroker?: SandboxNetworkPermissionBroker
-    sandboxCommands?: DockSandboxCommands
-    sessionCommands?: DockSessionCommands
+    memoryNotificationBroker?: MemoryNotificationBroker
     startupNotices?: readonly string[]
-    tui: TUI
+    preview?: { logoRows?: () => LogoRows; helper?: string | (() => string) }
   }) {
-    this.#agentCommands = options.agentCommands
     this.#controller = options.controller
     this.#tui = options.tui
+    this.#agents = options.agentCommands
     this.#sessionCommands = options.sessionCommands
     this.#sandboxCommands = options.sandboxCommands
-    let resolveStopped!: () => void
+    this.#preview = options.preview
     this.#stopped = new Promise((resolve) => {
-      resolveStopped = resolve
+      this.#resolveStopped = resolve
     })
-    this.#resolveStopped = resolveStopped
+    this.#main = new TranscriptState(this.#info().sessionId)
+    this.#main.setMessages(this.#controller.displayMessages ?? this.#controller.messages ?? [])
+    this.#mainView = new TranscriptView(this.#main)
+    for (const text of options.startupNotices ?? []) this.#main.notice(`Warning: ${text}`)
+    this.#brand = new Brand(
+      () => this.#info(),
+      () => this.#tui.terminal.rows,
+      () => this.#preview?.logoRows?.() ?? 5,
+    )
+    this.#mainBody = {
+      render: (width) => [...this.#brand.render(width), ...this.#mainView.render(width)],
+      invalidate: () => this.#mainView.invalidate(),
+    }
+    this.#childBody = {
+      render: (width) => [
+        ...new Brand(
+          () => ({
+            ...this.#info(),
+            cwd: this.#activeAgent?.cwd ?? '',
+            modelReference: this.#activeAgent?.modelReference ?? '',
+          }),
+          () => this.#tui.terminal.rows,
+          () => 3,
+        ).render(width),
+        muted(
+          `Agent ${safeText(this.#activeAgent?.name ?? this.#activeAgent?.description ?? '')} · ${this.#activeAgent?.status ?? ''}`,
+        ),
+        muted(safeText(this.#activeAgent?.id ?? '')),
+        muted(safeText(this.#activeAgent?.outputFile ?? '')),
+        '',
+        ...(this.#childView?.render(width) ?? []),
+      ],
+      invalidate: () => this.#childView?.invalidate(),
+    }
     this.#editor = new Editor(this.#tui, editorTheme)
-    this.#status = new Text(`${this.#controller.permissionMode ?? 'default'} · ready`, 1, 0)
-    this.#permissionCycle = ['default', 'acceptEdits', 'plan']
-    if (this.#controller.permissionMode === 'bypassPermissions') {
-      this.#permissionCycle.push('bypassPermissions')
-    }
-
-    this.#tui.addChild(new Text('Dock', 1, 0))
-    this.#tui.addChild(new Spacer(1))
-    for (const notice of options.startupNotices ?? []) {
-      this.#tui.addChild(new Text(`Warning: ${notice}`, 1, 0))
-    }
-    this.#tui.addChild(this.#status)
-    this.#tui.addChild(this.#editor)
-    this.#tui.setFocus(this.#editor)
-    this.#editor.onSubmit = (text) => {
-      void this.submit(text).catch((error) => this.#showError(error))
-    }
-    this.#tui.addInputListener((data) => {
-      if (matchesKey(data, Key.ctrl('b'))) {
-        void this.#agentCommands?.background().catch((error) => this.#showError(error))
-        return { consume: true }
-      }
-      if (this.#modal > 0 && matchesKey(data, Key.escape)) return undefined
-      if (matchesKey(data, Key.ctrl('c'))) {
-        if (this.#busy) this.#controller.abort('interrupt')
-        else void this.stop()
-        return { consume: true }
-      }
-      if (matchesKey(data, Key.escape) && this.#busy) {
-        this.#controller.abort('interrupt')
-        return { consume: true }
-      }
-      if (matchesKey(data, Key.shift('tab')) && !this.#busy) {
-        this.#cyclePermissionMode()
-        return { consume: true }
-      }
-      if (
-        matchesKey(data, Key.escape) &&
-        !this.#busy &&
-        !this.#editor.getText() &&
-        Date.now() - this.#lastEscapeAt <= 500
-      ) {
-        this.#lastEscapeAt = 0
-        void this.#selectRewindPoint()
-        return { consume: true }
-      }
-      if (matchesKey(data, Key.escape)) this.#lastEscapeAt = Date.now()
-      return undefined
+    this.#screen = new FullscreenView({
+      tui: this.#tui,
+      editor: this.#editor,
+      body: () => this.#taskList ?? (this.#activeAgent ? this.#childBody : this.#mainBody),
+      panel: () => this.#panel,
+      status: () => this.#status(),
+      target: () => this.#targetLabel(),
+      helper: () =>
+        typeof this.#preview?.helper === 'function'
+          ? this.#preview.helper()
+          : (this.#preview?.helper ?? '/help · Ctrl+O details · /search · /tasks'),
     })
+    this.#registerCommands()
+    this.#editor.setAutocompleteProvider(this.#commands.autocomplete)
+    this.#seedHistory()
+    this.#editor.onSubmit = (text) => {
+      this.#editor.addToHistory(text)
+      void this.submit(text).catch((e) => this.#error(e))
+    }
+    this.#tui.setFocus(this.#editor)
+    this.#tui.addInputListener((data) => this.#input(data), { prepend: true })
     options.permissionBroker?.setHandler((request) => this.#requestPermission(request))
-    options.sandboxNetworkPermissionBroker?.setHandler((request) =>
-      this.#requestSandboxNetwork(request),
-    )
-    options.memoryNotificationBroker?.setHandler((notification) =>
-      this.#renderMemoryNotification(notification),
-    )
+    options.sandboxNetworkPermissionBroker?.setHandler((request) => this.#requestNetwork(request))
+    options.memoryNotificationBroker?.setHandler((notification) => {
+      if (
+        this.#closing ||
+        (notification.sessionId && notification.sessionId !== this.#info().sessionId)
+      )
+        return
+      this.#main.notice(
+        `Saved ${notification.paths.length} ${notification.paths.length === 1 ? 'memory' : 'memories'}`,
+      )
+      this.#refresh()
+    })
+    this.#subscribe()
   }
-
+  get screen(): FullscreenView {
+    return this.#screen
+  }
+  get transcript(): TranscriptState {
+    return this.#main
+  }
   start(): void {
-    this.#tui.start()
+    try {
+      this.#tui.start()
+    } catch (error) {
+      this.#tui.stop()
+      throw error
+    }
   }
-
+  waitUntilStopped(): Promise<void> {
+    return this.#stopped
+  }
   async stop(): Promise<void> {
     if (this.#closing) return this.#stopped
     this.#closing = true
-    for (const cancel of this.#cancelModals) cancel()
+    this.#generation++
+    this.#viewTicket++
+    this.#unsubscribe?.()
+    this.#unsubscribe = undefined
+    if (this.#refreshTimer) clearTimeout(this.#refreshTimer)
+    this.#cancelPanel?.()
     this.#controller.abort('shutdown')
     try {
-      await this.#agentCommands?.close()
+      await this.#agents?.close()
       await this.#controller.close()
+      await this.#mainTask
     } finally {
+      this.#editor.setText('')
       this.#tui.stop()
       this.#resolveStopped()
     }
   }
-
-  waitUntilStopped(): Promise<void> {
-    return this.#stopped
+  #info(): SessionViewInfo {
+    return (
+      this.#controller.getViewInfo?.() ?? {
+        cwd: '',
+        modelReference: '',
+        permissionMode: this.#controller.permissionMode ?? 'default',
+        contextSummary: this.#controller.contextSummary?.() ?? '',
+      }
+    )
   }
-
+  #status(): string {
+    const state = this.#activeAgent ? this.#child : this.#main
+    const status = this.#panel
+      ? 'awaiting input'
+      : state?.status === 'compacting'
+        ? 'compacting'
+        : this.#busy
+          ? 'working'
+          : (state?.status ?? 'ready')
+    return [
+      this.#controller.permissionMode ?? 'default',
+      status,
+      this.#preview ? 'No backend' : this.#info().modelReference,
+      this.#queue.length ? `${this.#queue.length} queued` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ')
+  }
+  #targetLabel(): string {
+    return this.#activeAgent
+      ? `To agent ${safeText(this.#activeAgent.name ?? this.#activeAgent.description)} · ${this.#activeAgent.id} · commands affect main`
+      : this.#info().contextSummary || 'Main conversation'
+  }
+  #refresh(): void {
+    if (this.#closing || this.#refreshTimer) return
+    this.#refreshTimer = setTimeout(() => {
+      this.#refreshTimer = undefined
+      if (!this.#closing) this.#tui.requestRender()
+    }, 50)
+    this.#refreshTimer.unref?.()
+  }
+  #error(error: unknown): void {
+    if (!this.#closing) {
+      ;(this.#child ?? this.#main).notice(
+        error instanceof Error ? error.message : String(error),
+        true,
+      )
+      this.#refresh()
+    }
+  }
+  #notice(text: string): void {
+    this.#main.notice(text)
+    this.#refresh()
+  }
+  #input(data: string): TuiInputListenerResult {
+    if (this.#closing) return { consume: true }
+    if (this.#tui.isSearching) return undefined
+    if (this.#panel) {
+      this.#panel.handleInput(data)
+      this.#tui.requestRender()
+      if (matchesKey(data, Key.ctrl('c'))) this.#cancelPanel?.()
+      return { consume: true }
+    }
+    if (matchesKey(data, Key.ctrl('c'))) {
+      if (this.#tui.hasTextSelection) void this.#tui.copySelectedText().catch((e) => this.#error(e))
+      else if (this.#busy) this.#controller.abort('interrupt')
+      else void this.stop()
+      return { consume: true }
+    }
+    if (matchesKey(data, Key.ctrl('b'))) {
+      void this.#agents?.background().catch((e) => this.#error(e))
+      return { consume: true }
+    }
+    if (matchesKey(data, Key.ctrl('o'))) {
+      const view = this.#childView ?? this.#mainView
+      view.detailed = !view.detailed
+      this.#tui.requestRender()
+      return { consume: true }
+    }
+    if (this.#taskList) {
+      if (matchesKey(data, Key.escape)) {
+        this.#returnMain()
+        return { consume: true }
+      }
+      if (this.#editor.getText()) return undefined
+      if (matchesKey(data, Key.up))
+        this.#taskList.selected = Math.max(0, this.#taskList.selected - 1)
+      else if (matchesKey(data, Key.down))
+        this.#taskList.selected = Math.min(
+          this.#taskList.items.length - 1,
+          this.#taskList.selected + 1,
+        )
+      else if (matchesKey(data, Key.enter)) {
+        const item = this.#taskList.items[this.#taskList.selected]
+        if (item) void this.#openTask(item.id).catch((e) => this.#error(e))
+      } else if (data === 'x') {
+        const item = this.#taskList.items[this.#taskList.selected]
+        if (item)
+          void this.#agents
+            ?.stop(item.id)
+            .then(() => this.#loadTasks())
+            .catch((e) => this.#error(e))
+      } else return undefined
+      this.#screen.scroll.scrollTo(Math.max(0, this.#taskList?.selected ?? 0) * 2)
+      this.#tui.requestRender()
+      return { consume: true }
+    }
+    if (matchesKey(data, Key.escape)) {
+      if (this.#activeAgent || this.#snapshotBuffer) {
+        this.#returnMain()
+        return { consume: true }
+      }
+      if (this.#editor.isShowingAutocomplete()) return undefined
+      if (this.#mainView.detailed) {
+        this.#mainView.detailed = false
+        this.#tui.requestRender()
+        return { consume: true }
+      }
+      if (this.#busy) {
+        this.#controller.abort('interrupt')
+        return { consume: true }
+      }
+      if (!this.#editor.getText() && Date.now() - this.#lastEscape <= 500) {
+        void this.#rewind().catch((e) => this.#error(e))
+        this.#lastEscape = 0
+        return { consume: true }
+      }
+      this.#lastEscape = Date.now()
+    }
+    if (matchesKey(data, Key.shift('tab')) && !this.#busy && this.#controller.setPermissionMode) {
+      const modes: PermissionMode[] = ['default', 'acceptEdits', 'plan'],
+        current = this.#controller.permissionMode as PermissionMode
+      this.#controller.setPermissionMode(
+        modes[(modes.indexOf(current) + 1) % modes.length] ?? 'default',
+      )
+      this.#tui.requestRender()
+      return { consume: true }
+    }
+    return undefined
+  }
   async submit(text: string): Promise<void> {
+    await this.#submit(text, this.#activeAgent?.id)
+  }
+  async #submit(text: string, target?: string): Promise<void> {
     const trimmed = text.trim()
     if (!trimmed || this.#closing) return
     if (trimmed === '/exit') {
       await this.stop()
       return
     }
-    if (trimmed === '/tasks' || trimmed.startsWith('/tasks ')) {
-      await this.#tasksCommand(trimmed.slice('/tasks'.length).trim())
+    const command = trimmed.startsWith('/')
+    if (!command && target) {
+      await this.#agents?.send(target, trimmed)
+      this.#editor.setText('')
+      this.#drafts.set(target, '')
       return
     }
-    if (this.#busy) {
-      this.#queue.push(trimmed)
-      this.#status.setText(
-        `${this.#controller.permissionMode ?? 'default'} · working · ${this.#queue.length} queued`,
-      )
-      this.#tui.requestRender()
+    const immediate = /^\/(tasks|search|help)(?:\s|$)/.test(trimmed)
+    if ((this.#busy || this.#panelCount) && !immediate) {
+      this.#queue.push({ text: trimmed, ...(target ? { target } : {}) })
+      this.#editor.setText('')
+      this.#refresh()
       return
     }
-    if (trimmed === '/subtask' || trimmed.startsWith('/subtask ')) {
-      const prompt = trimmed.slice('/subtask'.length).trim()
-      if (!prompt) {
-        this.#insertTranscript(new Text('Usage: /subtask <task> — fork the current context', 1, 0))
-        this.#tui.requestRender()
-        return
-      }
-      if (!this.#agentCommands) throw new Error('Subagents unavailable')
-      this.#busy = true
-      try {
-        const agent = await this.#agentCommands.launch(prompt)
-        this.#insertTranscript(
-          new Text(`Agent ${agent.id} · ${agent.status} · ${agent.outputFile}`, 1, 0),
-        )
-      } finally {
-        this.#busy = false
-        this.#tui.requestRender()
-        this.notifyTasksChanged()
-      }
-      const queued = this.#queue.shift()
-      if (queued) await this.submit(queued)
+    this.#editor.setText('')
+    if (command) {
+      await this.#commands.execute(trimmed)
       return
     }
-    if (trimmed === '/clear') {
-      await this.#changeSession(async () => {
-        await this.#sessionCommands?.clear()
-        this.#clearTranscript()
-      })
-      return
-    }
-    if (trimmed === '/context') {
-      this.#insertTranscript(new Text(this.#controller.contextSummary?.() ?? 'Unavailable', 1, 0))
-      this.#tui.requestRender()
-      return
-    }
-    if (trimmed === '/compact' || trimmed.startsWith('/compact ')) {
-      this.#busy = true
-      this.#editor.disableSubmit = false
-      this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · compacting`)
-      this.#tui.requestRender()
-      try {
-        if (!this.#controller.compact) throw new Error('Compaction is unavailable')
-        await this.#controller.compact(trimmed.slice('/compact'.length).trim() || undefined)
-        this.#insertTranscript(new Text('Conversation compacted', 1, 0))
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        this.#insertTranscript(
-          new Text(
-            /cancel|abort/i.test(message)
-              ? 'Compaction cancelled'
-              : `Compaction failed: ${message}`,
-            1,
-            0,
-          ),
-        )
-      } finally {
-        this.#busy = false
-        this.#editor.disableSubmit = false
-        this.#setReadyStatus()
-        this.#tui.requestRender()
-      }
-      const queued = this.#queue.shift()
-      if (queued) await this.submit(queued)
-      else this.#flushTasks()
-      return
-    }
-    if (trimmed.startsWith('/rename ')) {
-      await this.#controller.rename?.(trimmed.slice('/rename '.length).trim())
-      this.#insertTranscript(new Text('Session renamed', 1, 0))
-      this.#tui.requestRender()
-      return
-    }
-    if (trimmed === '/rename') {
-      this.#insertTranscript(new Text('Usage: /rename <name>', 1, 0))
-      this.#tui.requestRender()
-      return
-    }
-    if (trimmed === '/permissions') {
-      await this.#selectPermissionMode()
-      return
-    }
-    if (trimmed === '/sandbox') {
-      await this.#selectSandboxMode()
-      return
-    }
-    if (trimmed === '/rewind') {
-      await this.#selectRewindPoint()
-      return
-    }
-    if (trimmed === '/resume' || trimmed.startsWith('/resume ')) {
-      await this.#resumeSession(trimmed.slice('/resume'.length).trim())
-      return
-    }
-    if (trimmed === '/branch' || trimmed.startsWith('/branch ')) {
-      await this.#changeSession(async () => {
-        await this.#sessionCommands?.branch(trimmed.slice('/branch'.length).trim() || undefined)
-        this.#renderControllerHistory()
-      })
-      return
-    }
-    if (trimmed.startsWith('/model ')) {
-      await this.#changeSession(async () => {
-        await this.#sessionCommands?.setModel(trimmed.slice('/model '.length).trim())
-        this.#renderControllerHistory()
-      })
-      return
-    }
-    if (trimmed === '/model') {
-      this.#insertTranscript(new Text('Usage: /model <provider:model-id>', 1, 0))
-      this.#tui.requestRender()
-      return
-    }
-    this.#insertTranscript(new Markdown(`**You**\n\n${trimmed}`, 1, 0, markdownTheme))
-    await this.#renderRun(this.#controller.submit(trimmed))
+    this.#main.addPrompt(trimmed)
+    await this.#run(this.#controller.submit(trimmed))
   }
-
-  async #renderRun(events: AsyncIterable<UiEvent>): Promise<void> {
+  async #run(events: AsyncIterable<UiEvent>): Promise<void> {
     this.#busy = true
-    this.#editor.disableSubmit = false
-    this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · working`)
-    const toolNames = new Map<string, string>()
-    let assistant: Markdown | undefined
-    let assistantText = ''
-    let thinking: Text | undefined
-    let thinkingText = ''
-
-    try {
-      for await (const event of events) {
-        if (event.type === 'assistant_message') {
-          assistant = undefined
-          assistantText = ''
-          thinking = undefined
-          thinkingText = ''
+    const generation = this.#generation,
+      state = this.#main
+    state.status = 'working'
+    this.#refresh()
+    const work = (async () => {
+      try {
+        for await (const event of events) {
+          if (generation !== this.#generation || this.#closing) continue
+          state.apply(event)
+          this.#refresh()
         }
-        if (event.type === 'user_message' && event.message.agentEventKey) {
-          this.#insertTranscript(
-            new Text(`Subagent ${event.message.agentEventKey.split(':')[0]} update received`, 1, 0),
-          )
-        }
-        if (
-          event.type === 'model_stream' &&
-          event.event.type === 'content_block_delta' &&
-          event.event.delta.type === 'text_delta'
-        ) {
-          assistantText += event.event.delta.text
-          if (!assistant) {
-            assistant = new Markdown('', 1, 0, markdownTheme)
-            this.#insertTranscript(assistant)
-          }
-          assistant.setText(`**Dock**\n\n${assistantText}`)
-        } else if (
-          event.type === 'model_stream' &&
-          event.event.type === 'content_block_delta' &&
-          event.event.delta.type === 'thinking_delta'
-        ) {
-          thinkingText += event.event.delta.thinking
-          if (!thinking) {
-            thinking = new Text('', 1, 0)
-            this.#insertTranscript(thinking)
-          }
-          thinking.setText(`Thinking: ${thinkingText}`)
-        } else if (event.type === 'tool_execution_start') {
-          toolNames.set(event.toolUse.id, event.toolUse.name)
-          this.#renderToolStart(event.toolUse)
-        } else if (event.type === 'tool_result') {
-          let detail = event.result.isError ? `  Error: ${event.result.content}` : '  Done'
-          if (toolNames.get(event.result.toolUseId) === 'Agent' && !event.result.isError) {
-            try {
-              const task = JSON.parse(String(event.result.content)) as {
-                id: string
-                status: string
-                outputFile: string
-              }
-              detail = `  Agent ${task.id} · ${task.status}\n  ${task.outputFile}`
-            } catch {
-              /* Non-JSON results retain the generic tool completion display. */
-            }
-          }
-          this.#insertTranscript(new Text(detail, 1, 0))
-        } else if (event.type === 'compaction_status') {
-          if (event.status === 'started')
-            this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · compacting`)
-          else {
-            this.#insertTranscript(
-              new Text(
-                event.status === 'cancelled'
-                  ? 'Compaction cancelled'
-                  : `Compaction failed: ${event.message ?? 'Unknown error'}`,
-                1,
-                0,
-              ),
-            )
-            this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · working`)
-          }
-        } else if (event.type === 'compact') {
-          this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · working`)
-          this.#insertTranscript(new Text('  Conversation compacted', 1, 0))
-        }
+      } catch (error) {
+        state.apply({
+          type: 'turn_end',
+          result: {
+            reason: 'model_error',
+            error: error instanceof Error ? error.message : String(error),
+          },
+        })
+      } finally {
+        if (state.status === 'working') state.status = 'ready'
+        this.#busy = false
+        this.#refresh()
         this.#tui.requestRender()
       }
-    } catch (error) {
-      this.#insertTranscript(
-        new Text(`Error: ${error instanceof Error ? error.message : String(error)}`, 1, 0),
-      )
-    } finally {
-      this.#busy = false
-      this.#editor.disableSubmit = false
-      this.#setReadyStatus()
-      this.#tui.requestRender()
-    }
-
-    const queued = this.#queue.shift()
-    if (queued) await this.submit(queued)
-    else this.#flushTasks()
+    })()
+    this.#mainTask = work
+    await work
+    if (this.#mainTask === work) this.#mainTask = undefined
+    await this.#drain()
   }
-
+  async #drain(): Promise<void> {
+    if (this.#closing || this.#busy || this.#panelCount) return
+    const queued = this.#queue.shift()
+    if (queued) {
+      await this.#submit(queued.text, queued.target)
+      return
+    }
+    if (this.#pendingNotifications && this.#controller.processNotifications) {
+      this.#pendingNotifications = false
+      await this.#run(this.#controller.processNotifications())
+    }
+  }
   notifyTasksChanged(): void {
     if (this.#closing) return
-    this.#pendingTasks = true
-    queueMicrotask(() => this.#flushTasks())
-  }
-
-  #flushTasks(): void {
-    if (!this.#pendingTasks || this.#busy || this.#modal > 0 || this.#closing) return
-    this.#pendingTasks = false
-    if (this.#controller.processNotifications) {
-      void this.#renderRun(this.#controller.processNotifications()).catch((error) =>
-        this.#showError(error),
-      )
-    }
-  }
-
-  async #tasksCommand(args: string): Promise<void> {
-    if (!this.#agentCommands) throw new Error('Subagents unavailable')
-    const [action, id, ...rest] = args.split(/\s+/)
-    if (!action) {
-      const tasks = await this.#agentCommands.list()
-      this.#insertTranscript(
-        new Text(
-          tasks
-            .map((a) => `${a.id} · ${a.name ?? a.description} · ${a.status}\n  ${a.outputFile}`)
-            .join('\n') || 'No subagents in this session',
-          1,
-          0,
-        ),
-      )
-      this.#insertTranscript(
-        new Text(
-          '/tasks <id> · /tasks stop <id> · /tasks continue <id> [message] · /tasks send <id> <message>\nSubagent edits are not restored by the parent /rewind.',
-          1,
-          0,
-        ),
-      )
-    } else if (action === 'stop' && id) {
-      const a = await this.#agentCommands.stop(id)
-      this.#insertTranscript(new Text(`Stopped agent ${a.id}`, 1, 0))
-    } else if ((action === 'send' || action === 'continue') && id) {
-      const message = rest.join(' ') || (action === 'continue' ? 'Continue your task.' : '')
-      if (!message) throw new Error('A message is required')
-      await this.#agentCommands.send(id, message)
-      this.#insertTranscript(new Text(`Message sent to ${id}`, 1, 0))
-    } else {
-      const { agent, messages } = await this.#agentCommands.snapshot(action)
-      this.#insertTranscript(new Text(`${agent.id} · ${agent.status} · ${agent.outputFile}`, 1, 0))
-      for (const m of messages) {
-        const text = m.message.content
-          .map((b) =>
-            b.type === 'text'
-              ? b.text
-              : b.type === 'tool_use'
-                ? b.name
-                : b.type === 'tool_result'
-                  ? String(b.content)
-                  : '',
-          )
-          .filter(Boolean)
-          .join('\n')
-        if (text) this.#insertTranscript(new Text(`${m.type}: ${text}`, 1, 0))
-      }
-    }
-    this.#tui.requestRender()
-  }
-
-  #insertTranscript(component: Markdown | Text): void {
-    this.#tui.children.splice(this.#tui.children.length - 2, 0, component)
-  }
-
-  #renderMemoryNotification(notification: MemoryNotification): void {
-    if (notification.type !== 'saved') return
-    const count = notification.paths.length
-    this.#insertTranscript(new Text(`Saved ${count} ${count === 1 ? 'memory' : 'memories'}`, 1, 0))
-    this.#tui.requestRender()
-  }
-
-  #renderToolStart(toolUse: ToolUseBlock): void {
-    const path = typeof toolUse.input.file_path === 'string' ? toolUse.input.file_path : undefined
-    const command = typeof toolUse.input.command === 'string' ? toolUse.input.command : undefined
-    const pattern = typeof toolUse.input.pattern === 'string' ? toolUse.input.pattern : undefined
-    const detail =
-      path ??
-      command ??
-      pattern ??
-      (typeof toolUse.input.description === 'string' ? toolUse.input.description : undefined)
-    this.#insertTranscript(
-      new Text(`● ${toolUse.name}${detail ? `(${truncateDisplay(detail)})` : ''}`, 1, 0),
-    )
-    if (toolUse.name !== 'Edit') return
-    const oldString = toolUse.input.old_string
-    const newString = toolUse.input.new_string
-    if (typeof oldString === 'string') {
-      this.#insertTranscript(new Text(`  - ${truncateDisplay(oldString)}`, 1, 0))
-    }
-    if (typeof newString === 'string') {
-      this.#insertTranscript(new Text(`  + ${truncateDisplay(newString)}`, 1, 0))
-    }
-  }
-
-  #clearTranscript(): void {
-    this.#tui.children.splice(2, Math.max(0, this.#tui.children.length - 4))
-    this.#tui.requestRender(true)
-  }
-
-  async #requestPermission(request: PermissionRequest): Promise<PermissionApproval> {
-    return this.#withModal(() => this.#showPermission(request))
-  }
-
-  async #showPermission(request: PermissionRequest): Promise<PermissionApproval> {
-    if (this.#closing || request.signal.aborted) return { behavior: 'deny' }
-    this.#status.setText(
-      `Permission required · ${request.tool.name}` +
-        (request.requester ? ` · ${request.requester.label} [${request.requester.agentId}]` : ''),
-    )
-    this.#tui.requestRender()
-    return new Promise<PermissionApproval>((resolve) => {
-      const list = new SelectList(
-        [
-          { description: 'Run only this tool call', label: 'Yes', value: 'once' },
-          {
-            description: 'Share this call approval within the current session, including subagents',
-            label: 'Yes, for this session',
-            value: 'session',
-          },
-          ...(request.tool.getPermissionRule?.(request.input)
-            ? [
-                {
-                  description: 'Add an exact allow rule to project-local settings',
-                  label: "Yes, and don't ask again",
-                  value: 'always',
-                },
-              ]
-            : []),
-          { description: 'Return a denial to the model', label: 'No', value: 'no' },
-        ],
-        request.tool.getPermissionRule?.(request.input) ? 4 : 3,
-        selectListTheme,
-      )
-      const title = new Text(
-        [
-          request.requester
-            ? `Agent: ${request.requester.label} [${request.requester.agentId}]`
-            : 'Main agent',
-          `${request.tool.name}: ${truncateDisplay(JSON.stringify(request.input))}`,
-        ].join('\n'),
-        0,
-        0,
-      )
-      const overlay = this.#tui.showOverlay(
-        {
-          render: (width) => [...title.render(width), ...list.render(width)],
-          handleInput: (data) => list.handleInput(data),
-          invalidate: () => {
-            title.invalidate()
-            list.invalidate()
-          },
-        },
-        { anchor: 'bottom-center', width: '70%' },
-      )
-      let settled = false
-      const finish = (approval: PermissionApproval) => {
-        if (settled) return
-        settled = true
-        this.#cancelModals.delete(onAbort)
-        request.signal.removeEventListener('abort', onAbort)
-        overlay.hide()
-        this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · working`)
-        this.#tui.requestRender(true)
-        resolve(approval)
-      }
-      const onAbort = () => finish({ behavior: 'deny' })
-      this.#cancelModals.add(onAbort)
-      list.onSelect = (item) => {
-        const rule = request.tool.getPermissionRule?.(request.input)
-        finish(
-          item.value === 'once'
-            ? { behavior: 'allow_once' }
-            : item.value === 'session'
-              ? { behavior: 'allow_session' }
-              : item.value === 'always' && rule
-                ? { behavior: 'allow_always', rule }
-                : { behavior: 'deny' },
-        )
-      }
-      list.onCancel = () => finish({ behavior: 'deny' })
-      request.signal.addEventListener('abort', onAbort, { once: true })
-      if (request.signal.aborted) finish({ behavior: 'deny' })
+    this.#pendingNotifications = true
+    queueMicrotask(() => {
+      void this.#drain().catch((e) => this.#error(e))
     })
   }
-
-  async #requestSandboxNetwork(request: SandboxNetworkRequest): Promise<SandboxNetworkResponse> {
-    this.#status.setText(`Network permission required · ${request.host}`)
-    this.#tui.requestRender()
-    const selected = await this.#select([
-      { description: 'Allow this connection', label: 'Yes', value: 'yes' },
-      {
-        description: `Add ${request.host} to local settings`,
-        label: "Yes, and don't ask again",
-        value: 'persist',
-      },
-      { description: 'Block this connection', label: 'No', value: 'no' },
-    ])
-    this.#status.setText(
-      `${this.#controller.permissionMode ?? 'default'} · ${this.#busy ? 'working' : 'ready'}`,
-    )
-    return { allow: selected === 'yes' || selected === 'persist', persist: selected === 'persist' }
-  }
-
-  #showError(error: unknown): void {
-    this.#insertTranscript(
-      new Text(`Error: ${error instanceof Error ? error.message : String(error)}`, 1, 0),
-    )
-    this.#setReadyStatus()
-    this.#tui.requestRender()
-  }
-
-  async #selectPermissionMode(): Promise<void> {
-    if (!this.#controller.setPermissionMode) return
-    const values = [...this.#permissionCycle]
-    if (this.#controller.permissionMode === 'dontAsk') values.push('dontAsk')
-    const selected = await this.#select(
-      values.map((value) => ({ description: '', label: value, value })),
-    )
-    if (!selected) return
-    this.#controller.setPermissionMode(selected as PermissionMode)
-    this.#setReadyStatus()
-  }
-
-  async #selectSandboxMode(): Promise<void> {
-    if (!this.#sandboxCommands) return
-    const selected = await this.#select([
-      {
-        description: 'Sandboxed Bash runs without ordinary approval prompts',
-        label: 'Enabled · auto-allow',
-        value: 'auto-allow',
-      },
-      {
-        description: 'Sandboxed Bash still uses the regular permission flow',
-        label: 'Enabled · permissions',
-        value: 'regular-permissions',
-      },
-      {
-        description: 'Run Bash without OS sandbox isolation',
-        label: 'Disabled',
-        value: 'off',
-      },
-    ])
-    if (!selected) return
-    await this.#sandboxCommands.setMode(selected as DockSandboxMode)
-    this.#insertTranscript(new Text(`Sandbox mode: ${this.#sandboxCommands.getMode()}`, 1, 0))
-    this.#tui.requestRender()
-  }
-
-  #cyclePermissionMode(): void {
-    if (!this.#controller.setPermissionMode) return
-    const current = this.#controller.permissionMode ?? 'default'
-    const next =
-      this.#permissionCycle[
-        (this.#permissionCycle.indexOf(current as PermissionMode) + 1) %
-          this.#permissionCycle.length
-      ] ?? 'default'
-    this.#controller.setPermissionMode(next)
-    this.#setReadyStatus()
-    this.#tui.requestRender()
-  }
-
-  #setReadyStatus(): void {
-    this.#status.setText(`${this.#controller.permissionMode ?? 'default'} · ready`)
-  }
-
-  async #selectRewindPoint(): Promise<void> {
-    if (!this.#controller.rewind || !this.#controller.rewindPoints) return
-    const points = this.#controller.rewindPoints()
-    const selected = await this.#select(
-      points.map((point) => ({ description: '', label: point.label, value: point.uuid })),
-    )
-    const point = points.find((candidate) => candidate.uuid === selected)
-    if (!point) return
-    await this.#controller.rewind(point.uuid, { conversation: true, files: true })
-    this.#insertTranscript(new Text(`Rewound to: ${point.label}`, 1, 0))
-    this.#tui.requestRender(true)
-  }
-
-  async #resumeSession(value: string): Promise<void> {
-    if (!this.#sessionCommands) return
-    let selected = value
-    if (!selected) {
-      const sessions = await this.#sessionCommands.listSessions()
-      selected =
-        (await this.#select(sessions.map((session) => ({ ...session, description: '' })))) ?? ''
-    }
-    if (!selected) return
-    await this.#changeSession(async () => {
-      await this.#sessionCommands?.resume(selected)
-      this.#renderControllerHistory()
-    })
-  }
-
-  async #changeSession(change: () => Promise<void>): Promise<void> {
+  async #operation(work: () => Promise<void>): Promise<void> {
     this.#busy = true
+    this.#refresh()
     try {
-      await change()
+      await work()
     } finally {
       this.#busy = false
-      this.#setReadyStatus()
-      this.notifyTasksChanged()
+      this.#refresh()
+      await this.#drain()
     }
-    const queued = this.#queue.shift()
-    if (queued) await this.submit(queued)
   }
-
-  #renderControllerHistory(): void {
-    this.#clearTranscript()
-    for (const entry of this.#controller.messages ?? []) {
-      const text = entry.message.content
-        .filter((block) => block.type === 'text')
-        .map((block) => block.text)
-        .join('\n')
-      if (!text) continue
-      this.#insertTranscript(
-        new Markdown(
-          `**${entry.type === 'user' ? 'You' : 'Dock'}**\n\n${text}`,
-          1,
-          0,
-          markdownTheme,
-        ),
-      )
-    }
-    this.#tui.requestRender(true)
+  #reload(reset = false): void {
+    const info = this.#info()
+    if (reset || info.sessionId !== this.#main.sessionId) {
+      this.#generation++
+      this.#viewTicket++
+      this.#returnMain()
+      this.#main = new TranscriptState(info.sessionId)
+      this.#main.setMessages(this.#controller.displayMessages ?? this.#controller.messages ?? [])
+      this.#mainView = new TranscriptView(this.#main)
+      this.#editor.setText(this.#drafts.get(`main:${info.sessionId}`) ?? '')
+      this.#subscribe()
+      this.#screen.scroll.scrollToEnd()
+      this.#seedHistory()
+    } else
+      for (const message of this.#controller.displayMessages ?? this.#controller.messages ?? [])
+        this.#main.addMessage(message)
+    this.#refresh()
     this.notifyTasksChanged()
   }
-
-  async #withModal<T>(show: () => Promise<T>): Promise<T> {
-    this.#modal++
-    const next = this.#modalTail.then(show, show)
-    this.#modalTail = next.catch(() => {})
-    try {
-      return await next
-    } finally {
-      this.#modal--
-      this.#flushTasks()
+  #seedHistory(): void {
+    for (const message of this.#controller.messages ?? [])
+      if (message.type === 'user' && !message.isMeta && !message.isCompactSummary) {
+        const text = message.message.content
+          .filter((b) => b.type === 'text')
+          .map((b) => b.text)
+          .join('\n')
+        if (text) this.#editor.addToHistory(text)
+      }
+  }
+  #registerCommands(): void {
+    const add = (name: string, description: string, run: (args: string) => Promise<void>) =>
+      this.#commands.register(name, description, run)
+    add('exit', 'Close Dock', async () => this.stop())
+    add('help', 'Commands and keyboard shortcuts', async () => {
+      this.#notice(
+        `${this.#commands.help()}\nCtrl+O details · /search search · PgUp/PgDn scroll · Ctrl+End follow · Esc back/interrupt`,
+      )
+    })
+    add('search', 'Search the visible conversation', async () => {
+      this.#tui.openSearch()
+    })
+    if (this.#controller.contextSummary)
+      add('context', 'Show context usage', async () =>
+        this.#notice(this.#controller.contextSummary?.() ?? ''),
+      )
+    if (this.#controller.compact)
+      add('compact', 'Compact context [instructions]', async (args) =>
+        this.#operation(async () => {
+          this.#main.status = 'compacting'
+          this.#refresh()
+          try {
+            await this.#controller.compact?.(args || undefined)
+            this.#reload()
+            this.#main.status = 'ready'
+          } catch (error) {
+            const text = error instanceof Error ? error.message : String(error)
+            this.#main.notice(
+              /cancel|abort/i.test(text) ? 'Compaction cancelled' : `Compaction failed: ${text}`,
+              true,
+            )
+            this.#main.status = 'failed'
+          }
+        }),
+      )
+    if (this.#controller.rename)
+      add('rename', 'Rename session <name>', async (args) => {
+        if (!args) {
+          this.#notice('Usage: /rename <name>')
+          return
+        }
+        await this.#controller.rename?.(args)
+        this.#notice('Session renamed')
+      })
+    if (this.#controller.setPermissionMode)
+      add('permissions', 'Change permission mode', async () => {
+        const modes: PermissionMode[] = ['default', 'acceptEdits', 'plan']
+        if (this.#controller.permissionMode === 'bypassPermissions') modes.push('bypassPermissions')
+        if (this.#controller.permissionMode === 'dontAsk') modes.push('dontAsk')
+        const selected = await this.#choose(
+          'Permission mode',
+          'Main conversation',
+          modes.map((value) => ({ label: value, value })),
+        )
+        if (selected) this.#controller.setPermissionMode?.(selected as PermissionMode)
+      })
+    if (this.#sandboxCommands)
+      add('sandbox', 'Configure Bash sandbox', async () => {
+        const selected = await this.#choose('Bash sandbox', 'Main conversation', [
+          { label: 'Enabled · auto-allow', value: 'auto-allow' },
+          { label: 'Enabled · permissions', value: 'regular-permissions' },
+          { label: 'Disabled', value: 'off' },
+        ])
+        if (selected) {
+          await this.#sandboxCommands?.setMode(selected as DockSandboxMode)
+          this.#notice(`Sandbox mode: ${this.#sandboxCommands?.getMode()}`)
+        }
+      })
+    if (this.#controller.rewind && this.#controller.rewindPoints)
+      add('rewind', 'Rewind supported checkpoints', async () => this.#rewind())
+    if (this.#sessionCommands) {
+      add('clear', 'Start a new conversation', async () =>
+        this.#operation(async () => {
+          await this.#sessionCommands?.clear()
+          this.#reload(true)
+        }),
+      )
+      add('resume', 'Resume session [id or name]', async (args) =>
+        this.#operation(async () => {
+          let selected = args
+          if (!selected) {
+            const sessions = (await this.#sessionCommands?.listSessions()) ?? []
+            selected = (await this.#choose('Resume session', '', sessions)) || ''
+          }
+          if (selected) {
+            await this.#sessionCommands?.resume(selected)
+            this.#reload(true)
+          }
+        }),
+      )
+      add('branch', 'Fork this session [name]', async (args) =>
+        this.#operation(async () => {
+          await this.#sessionCommands?.branch(args || undefined)
+          this.#reload(true)
+        }),
+      )
+      add('model', 'Switch model <provider:model>', async (args) => {
+        if (!args) {
+          this.#notice('Usage: /model <provider:model-id>')
+          return
+        }
+        await this.#operation(async () => {
+          await this.#sessionCommands?.setModel(args)
+          this.#reload()
+          this.#notice(`Main model: ${args}`)
+        })
+      })
+    }
+    if (this.#agents) {
+      add('tasks', 'View, stop or continue subagents', async (args) => this.#tasksCommand(args))
+      add('subtask', 'Fork a background task <prompt>', async (args) => {
+        if (!args) {
+          this.#notice('Usage: /subtask <task>')
+          return
+        }
+        await this.#operation(async () => {
+          const task = await this.#agents?.launch(args)
+          if (task) this.#notice(`Agent ${task.id} · ${task.status}`)
+        })
+      })
     }
   }
-
-  async #select(
-    items: Array<{ description: string; label: string; value: string }>,
-  ): Promise<string | undefined> {
-    return this.#withModal(
-      () =>
-        new Promise((resolve) => {
-          if (this.#closing) {
-            resolve(undefined)
-            return
-          }
-          const list = new SelectList(items, Math.min(items.length, 10), selectListTheme)
-          const overlay = this.#tui.showOverlay(list, { anchor: 'bottom-center', width: '70%' })
-          let settled = false
-          const cancel = () => finish()
-          const finish = (value?: string) => {
-            if (settled) return
-            settled = true
-            this.#cancelModals.delete(cancel)
-            overlay.hide()
-            this.#tui.requestRender(true)
-            resolve(value)
-          }
-          this.#cancelModals.add(cancel)
-          list.onSelect = (item) => finish(item.value)
-          list.onCancel = () => finish()
-        }),
-    )
+  async #rewind(): Promise<void> {
+    if (!this.#controller.rewind || !this.#controller.rewindPoints) return
+    if (this.#busy) {
+      this.#queue.push({ text: '/rewind' })
+      return
+    }
+    await this.#operation(async () => {
+      const points = this.#controller.rewindPoints?.() ?? []
+      const id = await this.#choose(
+        'Rewind',
+        'Only tracked file edits are recoverable. Bash and ordinary subagent edits are not covered.',
+        points.map((p) => ({ label: p.label, value: p.uuid })),
+      )
+      if (!id) return
+      const mode = await this.#choose('Restore what?', 'Main session checkpoint', [
+        { label: 'Conversation and tracked files', value: 'both' },
+        { label: 'Conversation only', value: 'conversation' },
+        { label: 'Tracked files only', value: 'files' },
+      ])
+      if (!mode) return
+      await this.#controller.rewind?.(id as UUID, {
+        conversation: mode !== 'files',
+        files: mode !== 'conversation',
+      })
+      this.#reload(mode !== 'files')
+      this.#notice('Rewound checkpoint')
+    })
   }
-}
-
-function truncateDisplay(value: string): string {
-  const normalized = value.replaceAll('\n', '↵')
-  return normalized.length <= 240 ? normalized : `${normalized.slice(0, 237)}...`
+  async #choose(
+    title: string,
+    body: string,
+    choices: readonly Choice[],
+    signal?: AbortSignal,
+  ): Promise<string | undefined> {
+    if (!choices.length) {
+      this.#notice(`${title}: no entries`)
+      return undefined
+    }
+    this.#panelCount++
+    const job = this.#panelTail.then(async () => {
+      if (this.#closing || signal?.aborted) return undefined
+      return new Promise<string | undefined>((resolve) => {
+        const panel = new InteractionPanel(title, body, choices)
+        this.#panel = panel
+        let done = false
+        const finish = (value?: string) => {
+          if (done) return
+          done = true
+          signal?.removeEventListener('abort', cancel)
+          this.#panel = undefined
+          this.#cancelPanel = undefined
+          this.#tui.setFocus(this.#editor)
+          this.#tui.requestRender()
+          resolve(value)
+        }
+        const cancel = () => finish()
+        this.#cancelPanel = cancel
+        panel.onSelect = finish
+        panel.onCancel = cancel
+        signal?.addEventListener('abort', cancel, { once: true })
+        this.#editor.focused = false
+        this.#tui.requestRender()
+        if (signal?.aborted) cancel()
+      })
+    })
+    this.#panelTail = job.catch(() => {})
+    try {
+      return await job
+    } finally {
+      this.#panelCount--
+      this.#refresh()
+      queueMicrotask(() => {
+        void this.#drain().catch((e) => this.#error(e))
+      })
+    }
+  }
+  async #requestPermission(request: PermissionRequest): Promise<PermissionApproval> {
+    const owner = request.requester
+      ? `Agent ${request.requester.label} [${request.requester.agentId}]`
+      : 'Main agent'
+    const state = request.requester?.agentId === this.#activeAgent?.id ? this.#child : this.#main
+    if (!request.sessionId || request.sessionId === this.#info().sessionId)
+      state?.setPermission(request.toolUseId, true)
+    const rule = request.tool.getPermissionRule?.(request.input)
+    const options: Choice[] = [
+      { label: 'Yes', value: 'once' },
+      { label: 'Yes, for this session', value: 'session' },
+      ...(rule ? [{ label: "Yes, and don't ask again", value: 'always' }] : []),
+      { label: 'No', value: 'no' },
+    ]
+    try {
+      const selected = await this.#choose(
+        `Permission required · ${request.tool.name}`,
+        `${owner + (request.sessionId ? `\nSession: ${request.sessionId}` : '')}\n${request.decision.message ?? ''}\n${JSON.stringify(request.input, null, 2)}`,
+        options,
+        request.signal,
+      )
+      if (selected === 'once') return { behavior: 'allow_once' }
+      if (selected === 'session') return { behavior: 'allow_session' }
+      if (selected === 'always' && rule) return { behavior: 'allow_always', rule }
+      return { behavior: 'deny' }
+    } finally {
+      state?.setPermission(request.toolUseId, false)
+    }
+  }
+  async #requestNetwork(request: SandboxNetworkRequest): Promise<SandboxNetworkResponse> {
+    const value = await this.#choose(
+      `Network permission required · ${request.host}`,
+      `Shared sandbox proxy · ${request.host}${request.port ? `:${request.port}` : ''}`,
+      [
+        { label: 'Yes', value: 'once' },
+        { label: "Yes, and don't ask again", value: 'persist' },
+        { label: 'No', value: 'no' },
+      ],
+    )
+    return { allow: value === 'once' || value === 'persist', persist: value === 'persist' }
+  }
+  async #tasksCommand(args: string): Promise<void> {
+    if (!this.#agents) return
+    const [action, id, ...rest] = args.split(/\s+/)
+    if (!action) {
+      this.#saveDraft()
+      this.#activeAgent = undefined
+      this.#childView = undefined
+      this.#taskList = new TaskList()
+      await this.#loadTasks()
+      this.#screen.scroll.scrollToStart()
+      return
+    }
+    if (action === 'stop' && id) {
+      await this.#agents.stop(id)
+      this.#notice(`Stopped agent ${id}`)
+      await this.#loadTasks()
+      return
+    }
+    if ((action === 'continue' || action === 'send') && id) {
+      const text = rest.join(' ') || (action === 'continue' ? 'Continue your task.' : '')
+      if (!text) throw new Error('A message is required')
+      await this.#agents.send(id, text)
+      this.#notice(`Message sent to ${id}`)
+      return
+    }
+    await this.#openTask(action)
+  }
+  async #loadTasks(): Promise<void> {
+    const generation = this.#generation,
+      items = (await this.#agents?.list()) ?? []
+    if (generation !== this.#generation || this.#closing) return
+    this.#taskList?.update(items)
+    this.#refresh()
+  }
+  #saveDraft(): void {
+    this.#drafts.set(
+      this.#activeAgent?.id ?? `main:${this.#main.sessionId}`,
+      this.#editor.getText(),
+    )
+    this.#editor.setText('')
+  }
+  #returnMain(): void {
+    this.#saveDraft()
+    this.#viewTicket++
+    this.#snapshotBuffer = undefined
+    this.#taskList = undefined
+    this.#activeAgent = undefined
+    this.#childView = undefined
+    this.#child = undefined
+    this.#activeRun = undefined
+    this.#editor.setText(this.#drafts.get(`main:${this.#info().sessionId}`) ?? '')
+    this.#tui.setFocus(this.#editor)
+    this.#screen.scroll.scrollToEnd()
+    this.#refresh()
+  }
+  async #openTask(id: string): Promise<void> {
+    if (!this.#agents) return
+    const ticket = ++this.#viewTicket,
+      generation = this.#generation
+    this.#snapshotBuffer = { id, updates: [] }
+    const snapshot = await this.#agents.snapshot(id)
+    if (ticket !== this.#viewTicket || generation !== this.#generation || this.#closing) return
+    this.#saveDraft()
+    this.#taskList = undefined
+    this.#activeAgent = snapshot.agent
+    this.#child = new TranscriptState(this.#info().sessionId)
+    this.#child.setMessages(snapshot.messages)
+    this.#childView = new TranscriptView(this.#child)
+    this.#activeRun = snapshot.runId
+    const updates = this.#snapshotBuffer?.updates ?? []
+    this.#snapshotBuffer = undefined
+    for (const update of updates)
+      if (update.sequence > (snapshot.sequence ?? 0)) this.#applyAgent(update)
+    this.#editor.setText(this.#drafts.get(snapshot.agent.id) ?? '')
+    this.#screen.scroll.scrollToEnd()
+    this.#refresh()
+  }
+  #subscribe(): void {
+    this.#unsubscribe?.()
+    const generation = this.#generation
+    this.#unsubscribe = this.#agents?.subscribe?.((update) => {
+      if (
+        this.#closing ||
+        generation !== this.#generation ||
+        update.sessionId !== this.#info().sessionId
+      )
+        return
+      if (this.#snapshotBuffer?.id === update.agentId) this.#snapshotBuffer.updates.push(update)
+      else this.#applyAgent(update)
+      if (this.#taskList) {
+        const items = this.#taskList.items.filter((a) => a.id !== update.agentId)
+        items.push(update.agent)
+        this.#taskList.update(items)
+      }
+      this.#refresh()
+    })
+  }
+  #applyAgent(update: AgentUiUpdate): void {
+    if (update.agentId !== this.#activeAgent?.id || !this.#child) return
+    this.#activeAgent = update.agent
+    if (this.#activeRun !== update.runId) {
+      this.#activeRun = update.runId
+      this.#child.apply({ type: 'turn_start' })
+    }
+    if (update.event)
+      this.#child.apply({ ...update.event, sessionId: update.sessionId, operationId: update.runId })
+    if (
+      ['completed', 'failed', 'stopped'].includes(update.agent.status) &&
+      !this.#endedRuns.has(update.runId)
+    ) {
+      this.#endedRuns.add(update.runId)
+      this.#child.apply({
+        type: 'turn_end',
+        result: {
+          reason:
+            update.agent.status === 'completed'
+              ? 'completed'
+              : update.agent.status === 'stopped'
+                ? 'aborted'
+                : 'model_error',
+          ...(update.agent.error ? { error: update.agent.error } : {}),
+        },
+      })
+    }
+  }
 }

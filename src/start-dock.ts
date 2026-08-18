@@ -5,7 +5,7 @@ import type { AgentTool, CanUseTool } from './tools/types.js'
 import type { UUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { ProcessTerminal, type Terminal, TuiMainScreen } from '@dock/tui'
+import { ProcessTerminal, type Terminal, TuiAltScreen } from '@dock/tui'
 import { FileHistory } from './checkpoint/file-history.js'
 import {
   loadProviderCredential,
@@ -502,7 +502,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       currentModelReference = reference
     },
   }
-  const tui = new TuiMainScreen(options.terminal ?? new ProcessTerminal())
+  const tui = new TuiAltScreen(options.terminal ?? new ProcessTerminal())
   const sandboxCommands = {
     getMode: () => sandbox.mode,
     async setMode(mode: Parameters<DockSandbox['setMode']>[0]) {
@@ -519,6 +519,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     controller: runtime,
     agentCommands: {
       list: () => agents.list(currentSessionId),
+      subscribe: (listener) => agents.subscribeUi(currentSessionId, listener),
       snapshot: (id) => agents.snapshot(currentSessionId, id),
       stop: (id) => agents.stop(currentSessionId, id, 'user'),
       send: (id, text) => agents.send(currentSessionId, id, text, { fromUser: true }),
@@ -560,11 +561,12 @@ export async function startDock(options: StartDockOptions): Promise<void> {
   agents.setWakeHandler((id) => {
     if (id === currentSessionId) app.notifyTasksChanged()
   })
-  app.start()
-  app.notifyTasksChanged()
   try {
+    app.start()
+    app.notifyTasksChanged()
     await app.waitUntilStopped()
   } finally {
+    await app.stop()
     await agents.close()
     await sandbox.reset()
   }

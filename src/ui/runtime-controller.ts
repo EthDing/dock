@@ -1,9 +1,9 @@
-import type { AgentSnapshot } from '../agents/types.js'
 import { randomUUID, type UUID } from 'node:crypto'
-import type { UiEvent, SessionViewInfo } from './contracts.js'
 import type { AgentLoopResult } from '../agent/run-agent-loop.js'
+import type { AgentSnapshot } from '../agents/types.js'
 import type { TranscriptMessage } from '../messages/create-message.js'
 import type { PermissionMode } from '../permissions/evaluate-permission.js'
+import type { SessionViewInfo, UiEvent } from './contracts.js'
 import type { DockUiController } from './dock-tui-app.js'
 
 export type RuntimeSession = Required<

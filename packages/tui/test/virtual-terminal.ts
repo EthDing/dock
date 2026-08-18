@@ -1,6 +1,6 @@
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import xterm from "@xterm/headless";
-import type { Terminal } from "../src/terminal.ts";
+import type { Terminal } from "@dock/tui";
 
 // Extract Terminal class from the module
 const XtermTerminal = xterm.Terminal;
@@ -10,8 +10,8 @@ const XtermTerminal = xterm.Terminal;
  */
 export class VirtualTerminal implements Terminal {
 	private xterm: XtermTerminalType;
-	private inputHandler?: (data: string) => void;
-	private resizeHandler?: () => void;
+	private inputHandler: ((data: string) => void) | undefined;
+	private resizeHandler: (() => void) | undefined;
 	private _columns: number;
 	private _rows: number;
 

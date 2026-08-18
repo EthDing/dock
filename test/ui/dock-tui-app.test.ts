@@ -1,4 +1,5 @@
-import { type Terminal, TuiMainScreen } from '@dock/tui'
+import { stripVTControlCharacters } from 'node:util'
+import { type Terminal, TuiAltScreen } from '@dock/tui'
 import { describe, expect, it, vi } from 'vitest'
 import { MemoryNotificationBroker } from '../../src/memory/memory-notification-broker.js'
 import { PermissionBroker } from '../../src/permissions/permission-broker.js'
@@ -47,7 +48,7 @@ describe('DockTuiApp', () => {
     }
     const permissionBroker = new PermissionBroker()
     const terminal = new MemoryTerminal()
-    const tui = new TuiMainScreen(terminal)
+    const tui = new TuiAltScreen(terminal)
     const app = new DockTuiApp({ controller, permissionBroker, tui })
     app.start()
     const abortController = new AbortController()
@@ -66,7 +67,9 @@ describe('DockTuiApp', () => {
       abortController.signal,
     )
     await vi.waitFor(() =>
-      expect(tui.render(80).join('\n')).toContain('Permission required · Write'),
+      expect(stripVTControlCharacters(tui.render(80).join('\n'))).toContain(
+        'Permission required · Write',
+      ),
     )
     terminal.send('\u001b[B')
     terminal.send('\u001b[B')
@@ -85,7 +88,9 @@ describe('DockTuiApp', () => {
       abortController.signal,
     )
     await vi.waitFor(() =>
-      expect(tui.render(80).join('\n')).toContain('Permission required · Bash'),
+      expect(stripVTControlCharacters(tui.render(80).join('\n'))).toContain(
+        'Permission required · Bash',
+      ),
     )
     terminal.send('\u001b[B')
     terminal.send('\u001b[B')
@@ -104,7 +109,7 @@ describe('DockTuiApp', () => {
       async *submit() {},
     }
     const memoryNotificationBroker = new MemoryNotificationBroker()
-    const tui = new TuiMainScreen(new MemoryTerminal())
+    const tui = new TuiAltScreen(new MemoryTerminal())
     new DockTuiApp({ controller, memoryNotificationBroker, tui })
 
     memoryNotificationBroker.notify({
@@ -112,7 +117,7 @@ describe('DockTuiApp', () => {
       type: 'saved',
     })
 
-    expect(tui.render(80).join('\n')).toContain('Saved 2 memories')
+    expect(stripVTControlCharacters(tui.render(80).join('\n'))).toContain('Saved 2 memories')
   })
 
   it('renders submitted user text and streamed assistant text', async () => {
@@ -130,12 +135,12 @@ describe('DockTuiApp', () => {
         }
       },
     }
-    const tui = new TuiMainScreen(new MemoryTerminal())
+    const tui = new TuiAltScreen(new MemoryTerminal())
     const app = new DockTuiApp({ controller, tui })
 
     await app.submit('hi')
 
-    const rendered = tui.render(80).join('\n')
+    const rendered = stripVTControlCharacters(tui.render(80).join('\n'))
     expect(rendered).toContain('hi')
     expect(rendered).toContain('hello from Dock')
   })
@@ -164,13 +169,13 @@ describe('DockTuiApp', () => {
         }
       },
     }
-    const tui = new TuiMainScreen(new MemoryTerminal())
+    const tui = new TuiAltScreen(new MemoryTerminal())
     const app = new DockTuiApp({ controller, tui })
 
     await app.submit('edit it')
 
-    const rendered = tui.render(80).join('\n')
-    expect(rendered).toContain('Edit(/work/file.ts)')
+    const rendered = stripVTControlCharacters(tui.render(80).join('\n'))
+    expect(rendered).toContain('Edit /work/file.ts')
     expect(rendered).toContain('- const before = true')
     expect(rendered).toContain('+ const after = true')
     expect(rendered).toContain('Done')
@@ -201,7 +206,7 @@ describe('DockTuiApp', () => {
         calls.push(`model:${value}`)
       },
     }
-    const tui = new TuiMainScreen(new MemoryTerminal())
+    const tui = new TuiAltScreen(new MemoryTerminal())
     const app = new DockTuiApp({ controller, sessionCommands, tui })
 
     await app.submit('/clear')
@@ -226,14 +231,14 @@ describe('DockTuiApp', () => {
       async *submit() {},
     }
     const terminal = new MemoryTerminal()
-    const tui = new TuiMainScreen(terminal)
+    const tui = new TuiAltScreen(terminal)
     const app = new DockTuiApp({ controller, tui })
     app.start()
 
     terminal.send('\u001b[Z')
 
     expect(permissionMode).toBe('acceptEdits')
-    expect(tui.render(80).join('\n')).toContain('acceptEdits · ready')
+    expect(stripVTControlCharacters(tui.render(80).join('\n'))).toContain('acceptEdits · ready')
     await app.stop()
   })
 
@@ -255,7 +260,7 @@ describe('DockTuiApp', () => {
       },
     }
     const terminal = new MemoryTerminal()
-    const tui = new TuiMainScreen(terminal)
+    const tui = new TuiAltScreen(terminal)
     const app = new DockTuiApp({ controller, tui })
     app.start()
 
@@ -276,7 +281,7 @@ describe('DockTuiApp', () => {
     }
     const broker = new SandboxNetworkPermissionBroker()
     const terminal = new MemoryTerminal()
-    const tui = new TuiMainScreen(terminal)
+    const tui = new TuiAltScreen(terminal)
     const app = new DockTuiApp({
       controller,
       sandboxNetworkPermissionBroker: broker,
@@ -300,7 +305,7 @@ describe('DockTuiApp', () => {
     }
     let mode: DockSandboxMode = 'off'
     const terminal = new MemoryTerminal()
-    const tui = new TuiMainScreen(terminal)
+    const tui = new TuiAltScreen(terminal)
     const app = new DockTuiApp({
       controller,
       sandboxCommands: {
@@ -334,15 +339,15 @@ describe('DockTuiApp', () => {
       abort: () => rejectCompact(new Error('Compaction cancelled')),
     }
     const terminal = new MemoryTerminal()
-    const tui = new TuiMainScreen(terminal)
+    const tui = new TuiAltScreen(terminal)
     const app = new DockTuiApp({ controller, tui })
     app.start()
     const pending = app.submit('/compact')
     await Promise.resolve()
-    expect(tui.render(80).join('\n')).toContain('compacting')
+    expect(stripVTControlCharacters(tui.render(80).join('\n'))).toContain('compacting')
     terminal.send('\u001b')
     await pending
-    const rendered = tui.render(80).join('\n')
+    const rendered = stripVTControlCharacters(tui.render(80).join('\n'))
     expect(rendered).toContain('Compaction cancelled')
     expect(rendered).not.toContain('Conversation compacted')
     await app.stop()
@@ -364,7 +369,7 @@ it('labels child permission prompts and Escape denies only that call, not the ma
   }
   const broker = new PermissionBroker(),
     terminal = new MemoryTerminal(),
-    tui = new TuiMainScreen(terminal)
+    tui = new TuiAltScreen(terminal)
   const app = new DockTuiApp({ controller, permissionBroker: broker, tui })
   app.start()
   const main = app.submit('working')
@@ -381,7 +386,9 @@ it('labels child permission prompts and Escape denies only that call, not the ma
     new AbortController().signal,
     { agentId: 'stable-child-id', label: 'Child task' },
   )
-  await vi.waitFor(() => expect(tui.render(80).join('\n')).toContain('Child task'))
+  await vi.waitFor(() =>
+    expect(stripVTControlCharacters(tui.render(80).join('\n'))).toContain('Child task'),
+  )
   terminal.send('\u001b')
   expect(await approval).toEqual({ behavior: 'deny' })
   expect(abort).not.toHaveBeenCalled()
@@ -397,7 +404,7 @@ it('closes an outstanding network permission dialog during shutdown', async () =
     async *submit() {},
   }
   const broker = new SandboxNetworkPermissionBroker(),
-    tui = new TuiMainScreen(new MemoryTerminal())
+    tui = new TuiAltScreen(new MemoryTerminal())
   const app = new DockTuiApp({ controller, sandboxNetworkPermissionBroker: broker, tui })
   app.start()
   const pending = broker.request({ host: 'example.invalid', port: 443 })
@@ -432,7 +439,7 @@ it('holds completion delivery until a session switch finishes', async () => {
   const app = new DockTuiApp({
     controller,
     sessionCommands: commands,
-    tui: new TuiMainScreen(new MemoryTerminal()),
+    tui: new TuiAltScreen(new MemoryTerminal()),
   })
   const changing = app.submit('/model test:new')
   app.notifyTasksChanged()
@@ -472,11 +479,11 @@ it('shows the stable identity and state returned by Agent instead of only Done',
       }
     },
   }
-  const tui = new TuiMainScreen(new MemoryTerminal()),
+  const tui = new TuiAltScreen(new MemoryTerminal()),
     app = new DockTuiApp({ controller, tui })
   await app.submit('delegate')
-  expect(tui.render(100).join('\n')).toContain('stable-child')
-  expect(tui.render(100).join('\n')).toContain('running')
+  expect(stripVTControlCharacters(tui.render(100).join('\n'))).toContain('stable-child')
+  expect(stripVTControlCharacters(tui.render(100).join('\n'))).toContain('running')
   await app.stop()
 })
 it('accepts /tasks from the terminal while the main model is still running', async () => {
@@ -496,7 +503,7 @@ it('accepts /tasks from the terminal while the main model is still running', asy
   const terminal = new MemoryTerminal(),
     app = new DockTuiApp({
       controller,
-      tui: new TuiMainScreen(terminal),
+      tui: new TuiAltScreen(terminal),
       agentCommands: {
         list,
         launch: async () => {
