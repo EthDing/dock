@@ -1,17 +1,17 @@
-import type { SessionViewInfo } from './ui/contracts.js'
-import type { AgentSnapshot } from './agents/types.js'
-import type { UserTranscriptMessage } from './messages/create-message.js'
 import type { UUID } from 'node:crypto'
 import { buildModelRequest } from './agent/request.js'
 import { type AgentEvent, type AgentLoopResult, runAgentLoop } from './agent/run-agent-loop.js'
+import type { AgentSnapshot } from './agents/types.js'
 import type { FileHistory } from './checkpoint/file-history.js'
 import { buildPostCompactMessages } from './context/compaction.js'
 import type { ContextManager } from './context/context-manager.js'
+import type { UserTranscriptMessage } from './messages/create-message.js'
 import { createUserMessage, type TranscriptMessage } from './messages/create-message.js'
 import type { ModelAdapter } from './model/types.js'
 import type { PermissionModeState } from './permissions/permission-mode-state.js'
 import type { SessionWriter } from './sessions/session-store.js'
 import type { AgentTool, CanUseTool } from './tools/types.js'
+import type { SessionViewInfo } from './ui/contracts.js'
 
 export class SessionController {
   readonly #identity:
@@ -250,7 +250,7 @@ export class SessionController {
       this.#messages = [...messages]
       if (result.userContext !== undefined) this.#userContext = result.userContext
     } catch (error) {
-      if (abort.signal.aborted) throw new Error('Compaction cancelled')
+      if (abort.signal.aborted) throw new DOMException('Compaction cancelled', 'AbortError')
       throw error
     } finally {
       this.#endOperation()

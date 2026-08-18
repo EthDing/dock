@@ -74,14 +74,29 @@ This uses the actual `@dock/tui` renderer, not the Dock agent or a browser mocku
 credential, session, sandbox or tool executor is initialized. F1/F2/F3 select startup/conversation/
 permission examples; F4 cycles a mascot drawn in exactly 3, 5 or 7 character rows. Enter plays
 fixed sample content, and Ctrl+C exits. A short terminal selects a smaller complete mascot.
-This preview is not yet the production UI. See [preview internals](docs/internals/ui-preview.md).
+The preview shares the production fullscreen components; only its data/controller and demo keys are separate.
+See [TUI internals](docs/internals/tui.md) and [preview internals](docs/internals/ui-preview.md).
 
-- `Esc` interrupts the active turn; press `Esc` twice on an empty editor to open rewind.
+Dock now uses a fullscreen, application-owned scrollback with a fixed composer and bottom confirmation area.
+The five-row character mascot scrolls away with the opening, and compact does not erase the display history.
+
+- Mouse wheel / `PageUp` / `PageDown` scroll history; `Ctrl+Home` / `Ctrl+End` jump to the top/latest output.
+  Scrolling up pauses automatic following. `Home` / `End` still edit the input line.
+- `Ctrl+O` toggles full thinking, tool parameters/results, and compact summaries; `/search` searches the current transcript.
+- Select text with the mouse to copy (OSC 52 support required). `Ctrl+C` copies an existing selection before interrupting/exiting.
+- `/` completes implemented commands; `/help` lists commands and shortcuts.
+- `Esc` closes search, menus or task details first; in a permission panel it declines that call.
+  Otherwise it interrupts the foreground turn without stopping background tasks. Double `Esc` on an empty editor opens rewind.
 - `Shift+Tab` cycles the normal permission modes. `Ctrl+C` exits while idle.
 - `/resume`, `/branch`, `/clear`, and `/rename` manage sessions without restarting Dock.
 - `/model <provider:model-id>` switches adapters, while `/permissions` changes the active mode.
 - `/context`, `/compact [instructions]`, and `/rewind` manage the active context and checkpoints.
-- `/exit` closes the session cleanly.
+- `/tasks` opens the task list; Enter opens details and `x` stops the selected task. Normal input in details is sent to that agent,
+  with a separate draft; built-in slash commands still affect the main session.
+- `/tasks continue <id> [message]` explicitly resumes a stopped task; `/tasks send <id> <message>` sends a follow-up.
+  `Ctrl+B` backgrounds a foreground agent without changing its ID.
+- `/rewind` offers conversation/files/both; Bash and ordinary subagent edits are not covered by parent file checkpoints.
+- `/exit` closes the session cleanly and restores the terminal.
 
 ## Context compaction
 

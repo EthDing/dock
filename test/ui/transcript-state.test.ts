@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { expect, it } from 'vitest'
-import { TranscriptState } from '../../src/ui/transcript-state.js'
-import { createSessionId } from '../../src/sessions/ids.js'
 import { createAssistantMessage, createUserMessage } from '../../src/messages/create-message.js'
+import { createSessionId } from '../../src/sessions/ids.js'
+import { TranscriptState } from '../../src/ui/transcript-state.js'
+
 it('merges streaming and committed messages, correlates results, and ignores other sessions', () => {
   const sessionId = createSessionId(),
     operationId = randomUUID(),

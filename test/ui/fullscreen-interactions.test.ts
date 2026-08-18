@@ -133,6 +133,7 @@ it('keeps task drafts and scoped live progress separate from main turns and stal
   })
   app.start()
   await app.submit(`/tasks ${agent.id}`)
+  expect(stripVTControlCharacters(tui.render(100).join('\n'))).toContain('default · working')
   app.screen.options.editor.setText('child draft')
   terminal.sendInput('\x1b')
   expect(app.screen.options.editor.getText()).toBe('')
@@ -185,4 +186,25 @@ it('only completes registered commands and retains their arguments', async () =>
   await registry.execute('/tasks send id hello')
   expect(run).toHaveBeenCalledWith('send id hello')
   await expect(registry.execute('/hooks')).rejects.toThrow('Unknown command')
+})
+it('restores the terminal if input initialization fails after entering alternate screen', async () => {
+  const terminal = new VirtualTerminal(80, 24),
+    writes: string[] = [],
+    write = terminal.write.bind(terminal)
+  terminal.write = (data) => {
+    writes.push(data)
+    write(data)
+  }
+  terminal.start = () => {
+    throw new Error('input unavailable')
+  }
+  const app = new DockTuiApp({
+    tui: new TuiAltScreen(terminal),
+    controller: { abort() {}, async close() {}, async *submit() {} },
+  })
+  expect(() => app.start()).toThrow('input unavailable')
+  expect(writes.join('')).toContain('\x1b[?1049l')
+  expect(writes.join('')).toContain('\x1b[?1006l')
+  expect(writes.join('')).toContain('\x1b[?25h')
+  await app.stop()
 })

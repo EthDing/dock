@@ -51,7 +51,9 @@ export class FullscreenView {
     const footer = panel ? [] : [o.target(), o.helper(), historyHint].filter(Boolean)
     const panelBudget = panel ? Math.min(14, Math.max(1, Math.floor(budget * 0.6))) : 0
     if (budget >= 5) result.push(muted(safeText(o.status())))
-    const footerBudget = panel ? 0 : Math.min(footer.length, Math.max(0, budget - 5))
+    const footerBudget = panel
+      ? 0
+      : Math.min(footer.length, Math.max(budget >= 3 ? 1 : 0, budget - 5))
     const editorBudget = Math.max(1, budget - result.length - panelBudget - footerBudget)
     const completionBudget = o.editor.isShowingAutocomplete()
       ? Math.min(4, Math.max(0, editorBudget - 3))

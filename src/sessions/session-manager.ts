@@ -5,10 +5,10 @@ import type { TextBlock } from '../model/types.js'
 import { asSessionId, type SessionId } from './ids.js'
 import {
   getProjectSessionsDirectory,
-  loadSession,
-  SessionWriter,
   type LoadedSession,
+  loadSession,
   type SessionMessageRecord,
+  SessionWriter,
 } from './session-store.js'
 
 type SessionLocation = {

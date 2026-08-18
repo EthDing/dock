@@ -1,11 +1,10 @@
-import { SubagentManager } from './agents/manager.js'
-import { createSubagentRuntime, type AgentPolicy } from './agents/runtime.js'
-import { createAgentTools } from './agents/tools.js'
-import type { AgentTool, CanUseTool } from './tools/types.js'
 import type { UUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { ProcessTerminal, type Terminal, TuiAltScreen } from '@dock/tui'
+import { SubagentManager } from './agents/manager.js'
+import { type AgentPolicy, createSubagentRuntime } from './agents/runtime.js'
+import { createAgentTools } from './agents/tools.js'
 import { FileHistory } from './checkpoint/file-history.js'
 import {
   loadProviderCredential,
@@ -54,6 +53,7 @@ import { createBashTool } from './tools/bash-tool.js'
 import { FileReadState } from './tools/file-read-state.js'
 import { createEditTool, createReadTool, createWriteTool } from './tools/file-tools.js'
 import { createGlobTool, createGrepTool } from './tools/search-tools.js'
+import type { AgentTool, CanUseTool } from './tools/types.js'
 import { type DockSessionCommands, DockTuiApp } from './ui/dock-tui-app.js'
 import { RuntimeController } from './ui/runtime-controller.js'
 
@@ -566,9 +566,15 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     app.notifyTasksChanged()
     await app.waitUntilStopped()
   } finally {
-    await app.stop()
-    await agents.close()
-    await sandbox.reset()
+    try {
+      await app.stop()
+    } finally {
+      try {
+        await agents.close()
+      } finally {
+        await sandbox.reset()
+      }
+    }
   }
 }
 

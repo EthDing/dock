@@ -3,6 +3,7 @@ import { visibleWidth } from '@dock/tui'
 import { describe, expect, it } from 'vitest'
 import { VirtualTerminal } from '../../packages/tui/test/virtual-terminal.js'
 import { renderCaseLogo, startTuiPreview } from '../../src/ui/preview/dock-preview.js'
+
 describe('shared real fullscreen preview', () => {
   it.each([3, 5, 7] as const)('renders exactly %i character rows without a bitmap', (rows) => {
     const lines = renderCaseLogo(rows)

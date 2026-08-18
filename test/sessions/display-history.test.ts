@@ -4,7 +4,9 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createUserMessage } from '../../src/messages/create-message.js'
 import { createSessionId } from '../../src/sessions/ids.js'
-import { SessionWriter, loadSession, getSessionPath } from '../../src/sessions/session-store.js'
+import { forkSession } from '../../src/sessions/session-manager.js'
+import { getSessionPath, loadSession, SessionWriter } from '../../src/sessions/session-store.js'
+
 const message = (text: string) => createUserMessage({ content: [{ type: 'text', text }] })
 const summary = (text: string) =>
   createUserMessage({ content: [{ type: 'text', text }] }, { isCompactSummary: true })
@@ -96,3 +98,37 @@ function createUserResult() {
     content: [{ type: 'tool_result', toolUseId: 'tool', content: 'RAW' }],
   })
 }
+it('replays a compacted branch without later parent messages and without changing its model context', async () => {
+  const { location, writer } = await setup(),
+    first = message('pre-compact'),
+    compact = summary('summary'),
+    tail = message('copied tail')
+  await writer.recordTranscript([first])
+  await writer.recordCompaction([compact])
+  await writer.recordTranscript([tail])
+  const childId = createSessionId()
+  const child = await forkSession({
+    ...location,
+    sourceSessionId: location.sessionId,
+    targetSessionId: childId,
+  })
+  expect(child.messages).toEqual([compact, tail])
+  expect(child.displayMessages).toEqual([first, compact, tail])
+  await writer.recordTranscript([message('later parent only')])
+  await writer.recordCompaction([summary('later summary')])
+  await writer.close()
+  const childLocation = { ...location, sessionId: childId },
+    childWriter = await SessionWriter.open(childLocation)
+  const kept = message('child followup')
+  await childWriter.recordTranscript([kept])
+  await childWriter.close()
+  const resumed = await loadSession(childLocation)
+  expect(resumed.messages).toEqual([compact, tail, kept])
+  expect(resumed.displayMessages).toEqual([first, compact, tail, kept])
+  const grandchild = await forkSession({
+    ...location,
+    sourceSessionId: childId,
+    targetSessionId: createSessionId(),
+  })
+  expect(grandchild.displayMessages).toEqual(resumed.displayMessages)
+})

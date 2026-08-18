@@ -336,7 +336,7 @@ describe('DockTuiApp', () => {
         new Promise<void>((_, reject) => {
           rejectCompact = reject
         }),
-      abort: () => rejectCompact(new Error('Compaction cancelled')),
+      abort: () => rejectCompact(new DOMException('Compaction cancelled', 'AbortError')),
     }
     const terminal = new MemoryTerminal()
     const tui = new TuiAltScreen(terminal)
@@ -350,6 +350,7 @@ describe('DockTuiApp', () => {
     const rendered = stripVTControlCharacters(tui.render(80).join('\n'))
     expect(rendered).toContain('Compaction cancelled')
     expect(rendered).not.toContain('Conversation compacted')
+    expect(app.transcript.status).toBe('interrupted')
     await app.stop()
   })
 })
@@ -531,4 +532,41 @@ it('accepts /tasks from the terminal while the main model is still running', asy
     await active
     await app.stop()
   }
+})
+it('does not attach an unseen child permission request to a main tool with the same call ID', async () => {
+  const broker = new PermissionBroker(),
+    terminal = new MemoryTerminal(),
+    tui = new TuiAltScreen(terminal)
+  const app = new DockTuiApp({
+    tui,
+    permissionBroker: broker,
+    controller: { abort() {}, async close() {}, async *submit() {} },
+  })
+  const tool: AgentTool = {
+    name: 'Read',
+    description: 'read',
+    inputSchema: {},
+    isConcurrencySafe: () => true,
+    execute: async () => ({ content: '' }),
+  }
+  app.start()
+  app.transcript.apply({
+    type: 'tool_execution_start',
+    toolUse: { type: 'tool_use', id: 'same', name: 'Read', input: {} },
+  })
+  const pending = broker.requestApproval(
+    tool,
+    {},
+    { behavior: 'ask', source: 'fallback' },
+    new AbortController().signal,
+    { agentId: 'other-child', label: 'Other' },
+    { toolUseId: 'same' },
+  )
+  await vi.waitFor(() =>
+    expect(stripVTControlCharacters(tui.render(80).join('\n'))).toContain('Permission required'),
+  )
+  expect(app.transcript.tool('same')?.status).toBe('running')
+  terminal.send('\x1b')
+  await pending
+  await app.stop()
 })

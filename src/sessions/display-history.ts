@@ -1,5 +1,6 @@
 import type { UUID } from 'node:crypto'
 import type { TranscriptMessage } from '../messages/create-message.js'
+import type { SessionId } from './ids.js'
 import type { SessionMessageRecord, SessionRecord } from './session-store.js'
 
 type Node = { message: TranscriptMessage; parent: Node | undefined }
@@ -61,4 +62,53 @@ export function buildDisplayHistory(
   const result: TranscriptMessage[] = []
   for (let node = head; node; node = node.parent) result.push(node.message)
   return result.reverse()
+}
+export async function resolveDisplayHistory(
+  records: readonly SessionRecord[],
+  readParent: (id: SessionId) => Promise<readonly SessionRecord[] | undefined>,
+  visited = new Set<SessionId>(),
+): Promise<readonly TranscriptMessage[]> {
+  const local = buildDisplayHistory(records)
+  const metadata = records[0]
+  if (
+    metadata?.type !== 'session_start' ||
+    !metadata.forkedFromSessionId ||
+    visited.has(metadata.sessionId)
+  )
+    return local
+  visited.add(metadata.sessionId)
+  const parent = await readParent(metadata.forkedFromSessionId)
+  if (!parent) return local
+  const indices = new Map(
+    parent.flatMap((record, index) =>
+      record.type === 'assistant' || record.type === 'user' ? [[record.uuid, index] as const] : [],
+    ),
+  )
+  let shared = 0,
+    end = -1
+  for (const message of local) {
+    const index = indices.get(message.uuid)
+    if (index === undefined) break
+    shared++
+    end = index
+  }
+  if (end < 0) return local
+  const anchor = parent[end]
+  if (anchor?.type === 'user' || anchor?.type === 'assistant') {
+    if (anchor.compactionId || (anchor.type === 'user' && anchor.isCompactSummary)) {
+      const boundary = parent.findIndex(
+        (record) =>
+          record.type === 'compact_boundary' &&
+          (anchor.compactionId
+            ? record.compactionId === anchor.compactionId
+            : record.summaryUuid === anchor.uuid),
+      )
+      if (boundary >= end) end = boundary
+    }
+  }
+  // Fork logs copy model context, not the old transcript. Follow only the shared
+  // UUID prefix in the origin; its later turns and discarded branches must not leak.
+  const inherited = await resolveDisplayHistory(parent.slice(0, end + 1), readParent, visited)
+  const ids = new Set(inherited.map((message) => message.uuid))
+  return [...inherited, ...local.slice(shared).filter((message) => !ids.has(message.uuid))]
 }

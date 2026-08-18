@@ -102,6 +102,7 @@ export class DockTuiApp {
   #childView: TranscriptView | undefined
   #activeAgent: AgentView | undefined
   #activeRun: string | undefined
+  #activeSequence = -1
   #taskList: TaskList | undefined
   #panel: InteractionPanel | undefined
   #panelCount = 0
@@ -271,13 +272,15 @@ export class DockTuiApp {
       ? 'awaiting input'
       : state?.status === 'compacting'
         ? 'compacting'
-        : this.#busy
+        : !this.#activeAgent && this.#busy
           ? 'working'
           : (state?.status ?? 'ready')
     return [
       this.#controller.permissionMode ?? 'default',
       status,
-      this.#preview ? 'No backend' : this.#info().modelReference,
+      this.#preview
+        ? 'No backend'
+        : (this.#activeAgent?.modelReference ?? this.#info().modelReference),
       this.#queue.length ? `${this.#queue.length} queued` : '',
     ]
       .filter(Boolean)
@@ -326,6 +329,17 @@ export class DockTuiApp {
     }
     if (matchesKey(data, Key.ctrl('b'))) {
       void this.#agents?.background().catch((e) => this.#error(e))
+      return { consume: true }
+    }
+    if (matchesKey(data, 'ctrl+home') || matchesKey(data, 'ctrl+end')) {
+      if (matchesKey(data, 'ctrl+home')) this.#screen.scroll.scrollToStart()
+      else this.#screen.scroll.scrollToEnd()
+      this.#tui.requestRender()
+      return { consume: true }
+    }
+    if (matchesKey(data, 'home') || matchesKey(data, 'end')) {
+      this.#editor.handleInput(data)
+      this.#tui.requestRender()
       return { consume: true }
     }
     if (matchesKey(data, Key.ctrl('o'))) {
@@ -546,11 +560,12 @@ export class DockTuiApp {
             this.#main.status = 'ready'
           } catch (error) {
             const text = error instanceof Error ? error.message : String(error)
+            const cancelled = error instanceof Error && error.name === 'AbortError'
             this.#main.notice(
-              /cancel|abort/i.test(text) ? 'Compaction cancelled' : `Compaction failed: ${text}`,
-              true,
+              cancelled ? 'Compaction cancelled' : `Compaction failed: ${text}`,
+              !cancelled,
             )
-            this.#main.status = 'failed'
+            this.#main.status = cancelled ? 'interrupted' : 'failed'
           }
         }),
       )
@@ -721,9 +736,13 @@ export class DockTuiApp {
     const owner = request.requester
       ? `Agent ${request.requester.label} [${request.requester.agentId}]`
       : 'Main agent'
-    const state = request.requester?.agentId === this.#activeAgent?.id ? this.#child : this.#main
-    if (!request.sessionId || request.sessionId === this.#info().sessionId)
-      state?.setPermission(request.toolUseId, true)
+    const state = request.requester
+      ? request.requester.agentId === this.#activeAgent?.id
+        ? this.#child
+        : undefined
+      : this.#main
+    const belongs = !request.sessionId || request.sessionId === this.#info().sessionId
+    if (belongs) state?.setPermission(request.toolUseId, true)
     const rule = request.tool.getPermissionRule?.(request.input)
     const options: Choice[] = [
       { label: 'Yes', value: 'once' },
@@ -743,7 +762,7 @@ export class DockTuiApp {
       if (selected === 'always' && rule) return { behavior: 'allow_always', rule }
       return { behavior: 'deny' }
     } finally {
-      state?.setPermission(request.toolUseId, false)
+      if (belongs) state?.setPermission(request.toolUseId, false)
     }
   }
   async #requestNetwork(request: SandboxNetworkRequest): Promise<SandboxNetworkResponse> {
@@ -762,9 +781,7 @@ export class DockTuiApp {
     if (!this.#agents) return
     const [action, id, ...rest] = args.split(/\s+/)
     if (!action) {
-      this.#saveDraft()
-      this.#activeAgent = undefined
-      this.#childView = undefined
+      this.#returnMain()
       this.#taskList = new TaskList()
       await this.#loadTasks()
       this.#screen.scroll.scrollToStart()
@@ -818,15 +835,30 @@ export class DockTuiApp {
     const ticket = ++this.#viewTicket,
       generation = this.#generation
     this.#snapshotBuffer = { id, updates: [] }
-    const snapshot = await this.#agents.snapshot(id)
+    let snapshot: Awaited<ReturnType<DockAgentCommands['snapshot']>>
+    try {
+      snapshot = await this.#agents.snapshot(id)
+    } catch (error) {
+      if (ticket === this.#viewTicket) this.#snapshotBuffer = undefined
+      throw error
+    }
     if (ticket !== this.#viewTicket || generation !== this.#generation || this.#closing) return
     this.#saveDraft()
     this.#taskList = undefined
     this.#activeAgent = snapshot.agent
     this.#child = new TranscriptState(this.#info().sessionId)
     this.#child.setMessages(snapshot.messages)
+    this.#child.status =
+      snapshot.agent.status === 'completed'
+        ? 'ready'
+        : snapshot.agent.status === 'failed'
+          ? 'failed'
+          : snapshot.agent.status === 'stopped'
+            ? 'interrupted'
+            : 'working'
     this.#childView = new TranscriptView(this.#child)
     this.#activeRun = snapshot.runId
+    this.#activeSequence = snapshot.sequence ?? -1
     const updates = this.#snapshotBuffer?.updates ?? []
     this.#snapshotBuffer = undefined
     for (const update of updates)
@@ -857,6 +889,8 @@ export class DockTuiApp {
   }
   #applyAgent(update: AgentUiUpdate): void {
     if (update.agentId !== this.#activeAgent?.id || !this.#child) return
+    if (update.sequence <= this.#activeSequence) return
+    this.#activeSequence = update.sequence
     this.#activeAgent = update.agent
     if (this.#activeRun !== update.runId) {
       this.#activeRun = update.runId

@@ -22,7 +22,7 @@ export class ToolComponent implements Component {
       call?.input.pattern ??
       call?.input.description ??
       ''
-    const result = [`${muted(`  ${call?.name ?? 'Tool'}`)} ${safeText(arg)}`]
+    const result = [`${muted(`  ${safeText(call?.name ?? 'Tool')}`)} ${safeText(arg)}`]
     result[0] = truncateToWidth(result[0] ?? '', width)
     if (detail && call)
       result.push(
@@ -63,7 +63,12 @@ export class ToolComponent implements Component {
     )
     if (tool.result) {
       const all = lines(tool.result.content, Math.max(1, width - 4))
-      result.push(...all.slice(0, detail ? undefined : 3).map((x) => `    ${x}`))
+      const visible = detail
+        ? all
+        : tool.status === 'error' || tool.status === 'aborted'
+          ? all.slice(-3)
+          : all.slice(0, 3)
+      result.push(...visible.map((x) => `    ${x}`))
       if (!detail && all.length > 3) result.push(muted('    … Ctrl+O for full output'))
     }
     return result.map((x) => truncateToWidth(x, width))

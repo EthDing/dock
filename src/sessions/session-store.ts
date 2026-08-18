@@ -1,11 +1,11 @@
-import { buildDisplayHistory } from './display-history.js'
 import { createHash, type UUID } from 'node:crypto'
-import { type FileHandle, mkdir, open, readFile, unlink, rmdir } from 'node:fs/promises'
+import { type FileHandle, mkdir, open, readFile, rmdir, unlink } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import type { FileHistorySnapshot } from '../checkpoint/file-history.js'
 import type { CompactionResult } from '../context/compaction.js'
 import { applyClearedToolResults } from '../context/tool-result-clearing.js'
 import type { TranscriptMessage } from '../messages/create-message.js'
+import { buildDisplayHistory, resolveDisplayHistory } from './display-history.js'
 import { asSessionId, isUuid, type SessionId } from './ids.js'
 
 export type SessionMetadataRecord = {
@@ -352,6 +352,20 @@ export class SessionWriter {
 }
 
 export async function loadSession(location: SessionLocation): Promise<LoadedSession> {
+  const loaded = await readSession(location)
+  loaded.displayMessages = await resolveDisplayHistory(loaded.records, async (sessionId) => {
+    try {
+      return (await readSession({ configDir: location.configDir, cwd: location.cwd, sessionId }))
+        .records
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'ENOENT') return undefined
+      throw error
+    }
+  })
+  return loaded
+}
+
+async function readSession(location: SessionLocation): Promise<LoadedSession> {
   const sessionPath = getSessionPath(location)
   const contents = await readFile(sessionPath, 'utf8')
   const hasCompleteFinalLine = contents.endsWith('\n')
