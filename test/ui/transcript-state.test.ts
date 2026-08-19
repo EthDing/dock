@@ -91,3 +91,26 @@ it('retains pre-compact history and partial text on model failure', () => {
   state.apply({ type: 'compact', messages: [summary] })
   expect(JSON.stringify(state.items)).toContain('old prompt')
 })
+it.each(['你好', '你是什么模型', '第一行\nsecond 😀'])(
+  'reconciles a pending prompt regardless of block property order: %s',
+  (text) => {
+    const state = new TranscriptState(createSessionId())
+    state.addPrompt(text)
+    const pending = state.items[0]
+    const committed = createUserMessage({ content: [{ text, type: 'text' }] })
+    state.apply({ type: 'user_message', message: committed })
+    expect(state.items).toHaveLength(1)
+    expect(state.items[0]).toBe(pending)
+    expect(state.items[0]).toMatchObject({ message: { uuid: committed.uuid }, pending: false })
+    state.apply({ type: 'user_message', message: committed })
+    expect(state.items).toHaveLength(1)
+    state.addPrompt(text)
+    const second = createUserMessage({ content: [{ text, type: 'text' }] })
+    state.apply({ type: 'user_message', message: second })
+    expect(state.items).toHaveLength(2)
+    expect(state.items.map((item) => (item.kind === 'message' ? item.message.uuid : ''))).toEqual([
+      committed.uuid,
+      second.uuid,
+    ])
+  },
+)

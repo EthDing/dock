@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import type { ToolOutcome } from '../agent/run-agent-loop.js'
 import {
   type AssistantTranscriptMessage,
@@ -75,13 +76,15 @@ export class TranscriptState {
       this.#byUuid.delete(stream.item.message.uuid)
       this.#streams.delete(streamKey as string)
     }
+    // Reconcile only a pending echo; property order is not content identity.
+    // Committed messages with equal text still remain separate user submissions.
     if (!item && message.type === 'user' && !message.isMeta && !message.isCompactSummary) {
       item = this.items.findLast(
         (entry): entry is MessageItem =>
           entry.kind === 'message' &&
           entry.pending === true &&
           entry.message.type === 'user' &&
-          JSON.stringify(entry.message.message.content) === JSON.stringify(message.message.content),
+          isDeepStrictEqual(entry.message.message.content, message.message.content),
       )
       if (item) this.#byUuid.delete(item.message.uuid)
     }

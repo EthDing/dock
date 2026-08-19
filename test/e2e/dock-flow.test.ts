@@ -1,8 +1,8 @@
-import { stripVTControlCharacters } from 'node:util'
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { TuiAltScreen, type Terminal } from '@dock/tui'
+import { stripVTControlCharacters } from 'node:util'
+import { type Terminal, TuiAltScreen } from '@dock/tui'
 import { describe, expect, it } from 'vitest'
 import { FileHistory } from '../../src/checkpoint/file-history.js'
 import { FakeModelAdapter } from '../../src/model/fake-model.js'
@@ -91,7 +91,7 @@ describe('Dock end-to-end flow', () => {
 
     await app.submit('Read hello.txt')
     const rendered = stripVTControlCharacters(tui.render(100).join('\n'))
-    expect(rendered).toContain('Read hello.txt')
+    expect(rendered.split('Read hello.txt')).toHaveLength(2)
     expect(rendered).toContain('Read')
     expect(rendered).toContain('The file says hello from the workspace.')
 
