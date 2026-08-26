@@ -13,6 +13,34 @@ const MESSAGE_TWO = asMessageUuid('20000000-0000-4000-8000-000000000002')
 const MESSAGE_THREE = asMessageUuid('20000000-0000-4000-8000-000000000003')
 
 describe('session store', () => {
+  it('persists Skill context metadata for resume', async () => {
+    const configDir = await mkdtemp(join(tmpdir(), 'dock-session-skill-'))
+    const cwd = '/work/project'
+    const writer = await SessionWriter.create({ configDir, cwd, sessionId: SESSION_ONE })
+    await writer.recordTranscript([
+      createUserMessage(
+        { content: [{ type: 'text', text: '<skill_content>review</skill_content>' }] },
+        {
+          isMeta: true,
+          skillContext: {
+            contentHash: 'hash',
+            location: '/skills/review/SKILL.md',
+            name: 'review',
+          },
+          uuid: MESSAGE_ONE,
+        },
+      ),
+    ])
+    await writer.close()
+
+    const loaded = await loadSession({ configDir, cwd, sessionId: SESSION_ONE })
+
+    expect(loaded.messages[0]).toMatchObject({
+      isMeta: true,
+      skillContext: { contentHash: 'hash', name: 'review' },
+    })
+  })
+
   it('persists messages with a parent chain and reloads them', async () => {
     const configDir = await mkdtemp(join(tmpdir(), 'dock-session-'))
     const cwd = '/work/project'

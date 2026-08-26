@@ -57,7 +57,7 @@ export async function discoverSkills(options: {
   const winners = new Map<string, SkillDefinition>()
 
   for (const root of roots) {
-    const matches = (
+    const discovered = (
       await fg('**/SKILL.md', {
         cwd: root.path,
         deep: MAX_SCAN_DEPTH,
@@ -66,9 +66,14 @@ export async function discoverSkills(options: {
         onlyFiles: true,
         unique: true,
       })
-    )
-      .sort()
-      .slice(0, MAX_FILES_PER_ROOT)
+    ).sort()
+    if (discovered.length > MAX_FILES_PER_ROOT)
+      diagnostics.push({
+        code: 'warning',
+        message: `Skill scan limit reached; ignored ${discovered.length - MAX_FILES_PER_ROOT} files`,
+        path: resolve(root.path),
+      })
+    const matches = discovered.slice(0, MAX_FILES_PER_ROOT)
     for (const relativePath of matches) {
       const location = resolve(root.path, relativePath)
       let parsed: { name: string; description: string }

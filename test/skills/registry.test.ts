@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { discoverSkills } from '../../src/skills/registry.js'
+import { discoverSkills, isSkillResourcePath } from '../../src/skills/registry.js'
 
 async function skill(root: string, directory: string, frontmatter: string, body = '# Body') {
   const path = join(root, directory)
@@ -61,6 +61,13 @@ describe('discoverSkills', () => {
 
     expect(registry.skills.map((s) => s.name)).toEqual(['good'])
     expect(registry.skills[0]?.description).toBe('Use when: reviewing code')
+    expect(
+      isSkillResourcePath(
+        registry,
+        join(projectRoot, '.agents', 'skills', 'good', 'references', 'guide.md'),
+      ),
+    ).toBe(true)
+    expect(isSkillResourcePath(registry, join(projectRoot, 'README.md'))).toBe(false)
     expect(registry.diagnostics).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
