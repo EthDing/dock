@@ -24,7 +24,10 @@ export type ContextManagerOptions = {
   maxOutputTokens: number
   summarize: (request: CompactionRequest) => Promise<CompactionResult>
   toolResultClearing?: ToolResultClearingSettings | undefined
-  prepareRestoration?: (signal: AbortSignal) => Promise<CompactionRestoration>
+  prepareRestoration?: (
+    messages: readonly TranscriptMessage[],
+    signal: AbortSignal,
+  ) => Promise<CompactionRestoration>
   now?: () => number
 }
 export class ContextManager {
@@ -77,7 +80,7 @@ export class ContextManager {
         trigger,
         ...(instructions ? { instructions } : {}),
       })
-      const restoration = await this.#options.prepareRestoration?.(signal)
+      const restoration = await this.#options.prepareRestoration?.(messages, signal)
       signal.throwIfAborted()
       const prepared = {
         ...result,

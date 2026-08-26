@@ -100,6 +100,21 @@ class MessageComponent implements Component {
         '',
       ]
     }
+    if (message.type === 'user' && message.skillContext) {
+      return [
+        muted(`Loaded Skill: ${safeText(message.skillContext.name)}`),
+        ...(this.detailed()
+          ? lines(
+              content
+                .filter((block) => block.type === 'text')
+                .map((block) => block.text)
+                .join('\n'),
+              width,
+            )
+          : []),
+        '',
+      ]
+    }
     const visible = content.some((b) => b.type !== 'tool_result')
     if (!visible) return []
     const role = message.type === 'assistant' ? 'Dock' : message.isMeta ? 'System' : 'You'

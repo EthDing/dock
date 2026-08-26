@@ -31,6 +31,7 @@ export type SubagentRuntime = {
   canUseTool?: CanUseTool | undefined
   contextManager?: ContextManager | undefined
   maxOutputTokens?: number | undefined
+  skills?: AgentSnapshot['skills']
 }
 type Actor = {
   preparing?: Promise<void> | undefined
@@ -50,7 +51,11 @@ type ManagerOptions = {
   maxConcurrent?: number | undefined
   maxDepth?: number | undefined
   baseRef?: 'fresh' | 'head' | undefined
-  createRuntime: (metadata: AgentMetadata, parent?: AgentSnapshot) => Promise<SubagentRuntime>
+  createRuntime: (
+    metadata: AgentMetadata,
+    parent?: AgentSnapshot,
+    messages?: readonly TranscriptMessage[],
+  ) => Promise<SubagentRuntime>
 }
 export class SubagentManager {
   readonly #store: AgentStore
@@ -251,6 +256,7 @@ export class SubagentManager {
             inputSchema,
           })),
         )
+      if (mode === 'fork' && parent.skills) meta.skills = structuredClone(parent.skills)
       actor.messages = context.messages
       await this.#save(actor)
       const initialWriter = await SessionWriter.create({
@@ -544,11 +550,11 @@ export class SubagentManager {
           meta.cwd = meta.worktree.path
         } else await this.#worktrees.lock(meta.worktree)
       }
-      const runtime = await this.#options.createRuntime(meta, actor.parentSnapshot)
-      signal.throwIfAborted()
       const location = this.#store.location(meta)
       const loaded = await loadSession(location)
       actor.messages = loaded.messages
+      const runtime = await this.#options.createRuntime(meta, actor.parentSnapshot, actor.messages)
+      signal.throwIfAborted()
       writer = await SessionWriter.open(location)
       const tail = actor.messages.at(-1)
       if (tail?.type === 'assistant') {
@@ -601,6 +607,7 @@ export class SubagentManager {
           cwd: meta.cwd,
           modelReference: meta.modelReference,
           fileReadState: runtime.fileReadState,
+          ...(runtime.skills ? { skills: runtime.skills } : {}),
         }),
         getPendingMessages: async (messages) => {
           const seen = new Set(messages.map((message) => message.uuid))

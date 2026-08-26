@@ -1,10 +1,12 @@
 import type { UUID } from 'node:crypto'
 import type { AgentSnapshot } from '../agents/types.js'
+import type { SkillActivationContext } from '../skills/activation.js'
 import type { JsonObject, JsonSchema } from '../model/types.js'
 import type { PermissionResult, ToolPermissionContext } from '../permissions/evaluate-permission.js'
 
 export type AgentToolResult = {
   content: string
+  context?: SkillActivationContext
   isError?: boolean
 }
 

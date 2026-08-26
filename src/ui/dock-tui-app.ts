@@ -29,6 +29,7 @@ import { type Choice, InteractionPanel } from './components/interaction-panel.js
 import { TaskList } from './components/task-list.js'
 import { TranscriptView } from './components/transcript.js'
 import type { SessionViewInfo, UiEvent } from './contracts.js'
+import type { SkillDefinition, SkillDiagnostic } from '../skills/registry.js'
 import { muted, safeText } from './presentation.js'
 import { editorTheme } from './themes.js'
 import { TranscriptState } from './transcript-state.js'
@@ -41,6 +42,9 @@ export type DockUiController = {
   abort: (reason?: unknown) => void
   close: () => Promise<void>
   submit: (text: string) => AsyncIterable<UiEvent>
+  activateSkill?: (name: string, invocationInput?: string) => AsyncIterable<UiEvent>
+  skills?: readonly SkillDefinition[]
+  skillDiagnostics?: readonly SkillDiagnostic[]
   compact?: (instructions?: string) => Promise<void>
   contextSummary?: () => string
   permissionMode?: string
@@ -92,6 +96,7 @@ export class DockTuiApp {
   readonly #editor: Editor
   readonly #screen: FullscreenView
   readonly #commands = new CommandRegistry()
+  readonly #skillCommands = new Set<string>()
   readonly #sessionCommands: DockSessionCommands | undefined
   readonly #sandboxCommands: DockSandboxCommands | undefined
   readonly #agents: DockAgentCommands | undefined
@@ -196,6 +201,7 @@ export class DockTuiApp {
           : (this.#preview?.helper ?? '/help · Ctrl+O details · /search · /tasks'),
     })
     this.#registerCommands()
+    this.#registerSkillCommands()
     this.#editor.setAutocompleteProvider(this.#commands.autocomplete)
     this.#seedHistory()
     this.#editor.onSubmit = (text) => {
@@ -521,6 +527,7 @@ export class DockTuiApp {
       for (const message of this.#controller.displayMessages ?? this.#controller.messages ?? [])
         this.#main.addMessage(message)
     this.#refresh()
+    this.#registerSkillCommands()
     this.notifyTasksChanged()
   }
   #seedHistory(): void {
@@ -544,6 +551,24 @@ export class DockTuiApp {
     })
     add('search', 'Search the visible conversation', async () => {
       this.#tui.openSearch()
+    })
+    add('skills', 'List available Skills and diagnostics', async () => {
+      const skills = this.#controller.skills ?? []
+      const diagnostics = this.#controller.skillDiagnostics ?? []
+      this.#notice(
+        [
+          skills.length
+            ? skills.map((skill) => `/${skill.name}  ${skill.description}`).join('\n')
+            : 'No Skills available',
+          ...(diagnostics.length
+            ? [
+                '',
+                'Diagnostics:',
+                ...diagnostics.map((item) => `${item.code}: ${item.path} · ${item.message}`),
+              ]
+            : []),
+        ].join('\n'),
+      )
     })
     if (this.#controller.contextSummary)
       add('context', 'Show context usage', async () =>
@@ -654,6 +679,20 @@ export class DockTuiApp {
           if (task) this.#notice(`Agent ${task.id} · ${task.status}`)
         })
       })
+    }
+  }
+
+  #registerSkillCommands(): void {
+    for (const name of this.#skillCommands) this.#commands.remove(name)
+    this.#skillCommands.clear()
+    if (!this.#controller.activateSkill) return
+    for (const skill of this.#controller.skills ?? []) {
+      if (this.#commands.has(skill.name)) continue
+      this.#commands.register(skill.name, skill.description, async (args) => {
+        if (!this.#controller.activateSkill) return
+        await this.#run(this.#controller.activateSkill(skill.name, args || undefined))
+      })
+      this.#skillCommands.add(skill.name)
     }
   }
   async #rewind(): Promise<void> {

@@ -53,6 +53,9 @@ import { createBashTool } from './tools/bash-tool.js'
 import { FileReadState } from './tools/file-read-state.js'
 import { createEditTool, createReadTool, createWriteTool } from './tools/file-tools.js'
 import { createGlobTool, createGrepTool } from './tools/search-tools.js'
+import { createSkillTool, SkillActivator } from './skills/activation.js'
+import { discoverSkills, isSkillResourcePath } from './skills/registry.js'
+import { prepareSkillRestoration } from './skills/context.js'
 import type { AgentTool, CanUseTool } from './tools/types.js'
 import { type DockSessionCommands, DockTuiApp } from './ui/dock-tui-app.js'
 import { RuntimeController } from './ui/runtime-controller.js'
@@ -266,10 +269,11 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     maxConcurrent: loadedSettings.settings.subagents?.maxConcurrent,
     maxDepth: loadedSettings.settings.subagents?.maxDepth,
     baseRef: loadedSettings.settings.worktree?.baseRef,
-    createRuntime: (metadata, parent) =>
+    createRuntime: (metadata, parent, initialMessages) =>
       createSubagentRuntime({
         metadata,
-        parent,
+        ...(parent ? { parent } : {}),
+        ...(initialMessages ? { initialMessages } : {}),
         manager: agents,
         resolveModel,
         loadUserContext,
@@ -324,6 +328,14 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     }
     const policy = policyFor(targetSessionId)
     const permissionRules: PermissionRules = policy.rules
+    const skillRegistry = await discoverSkills({
+      homeDir,
+      projectRoot: loadedSettings.projectRoot,
+    })
+    const skillActivator = new SkillActivator(skillRegistry, existing?.messages ?? [])
+    const skillTools = skillRegistry.skills.length
+      ? [createSkillTool(skillActivator, skillRegistry)]
+      : []
     const tools = filterDeniedTools(
       [
         createReadTool(fileDependencies),
@@ -333,6 +345,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
         createGrepTool({ cwd }),
         createBashTool({ cwd, homeDir, sandbox }),
         ...createAgentTools(agents),
+        ...skillTools,
       ],
       permissionRules,
     )
@@ -353,6 +366,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
         createGrepTool({ cwd }),
         createBashTool({ cwd, homeDir, sandbox }),
         ...createAgentTools(agents),
+        ...skillTools,
       ],
       permissionRules,
     )
@@ -360,7 +374,9 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       autoAllowInternalToolUse: (tool, input) =>
         typeof input.file_path === 'string' &&
         ((['Read', 'Write', 'Edit'].includes(tool.name) && memory.isMemoryPath(input.file_path)) ||
-          (tool.name === 'Read' && agents.isOutputPath(targetSessionId, input.file_path))),
+          (tool.name === 'Read' &&
+            (agents.isOutputPath(targetSessionId, input.file_path) ||
+              isSkillResourcePath(skillRegistry, input.file_path)))),
       autoAllowBashIfSandboxed: () => sandbox.autoAllowBashIfSandboxed,
       isBashSandboxed: (_tool, input) =>
         sandbox.shouldUseSandbox({
@@ -383,7 +399,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       maxOutputTokens: provider.maxOutputTokens ?? 8_192,
       toolResultClearing: loadedSettings.settings.contextManagement?.toolResultClearing,
       summarize: (input) => compactConversation({ ...input, model, transcriptPath: writer.path }),
-      prepareRestoration: async (signal) => {
+      prepareRestoration: async (messages, signal) => {
         const nextUserContext = await loadUserContext()
         const restored = await prepareFileRestoration({
           readFileState,
@@ -404,7 +420,11 @@ export async function startDock(options: StartDockOptions): Promise<void> {
             return decision.behavior === 'allow'
           },
         })
-        return { ...restored, userContext: nextUserContext }
+        return {
+          ...restored,
+          attachments: [...restored.attachments, ...prepareSkillRestoration(messages)],
+          userContext: nextUserContext,
+        }
       },
     })
     const systemPrompt = [
@@ -432,6 +452,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
         cwd,
         modelReference,
         fileReadState: readFileState,
+        skills: skillRegistry.skills,
       }),
       inbox: {
         peek: (seen) => agents.pendingNotifications(targetSessionId, seen),
@@ -446,6 +467,9 @@ export async function startDock(options: StartDockOptions): Promise<void> {
       model,
       modelId,
       permissionModeState,
+      skillActivator,
+      skills: skillRegistry.skills,
+      skillDiagnostics: skillRegistry.diagnostics,
       systemPrompt,
       tools,
       ...(extractMemories ? { turnComplete: extractMemories } : {}),

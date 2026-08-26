@@ -5,6 +5,7 @@ import type { ModelToolDefinition, Usage } from '../model/types.js'
 import type { SessionId } from '../sessions/ids.js'
 import type { FileReadState } from '../tools/file-read-state.js'
 import type { AgentWorktree } from './worktrees.js'
+import type { SkillDefinition } from '../skills/registry.js'
 
 export type AgentContextMode = 'fresh' | 'fork'
 export type AgentSnapshot = {
@@ -21,6 +22,7 @@ export type AgentSnapshot = {
   messages: readonly TranscriptMessage[]
   maxOutputTokens?: number | undefined
   fileReadState?: FileReadState | undefined
+  skills?: readonly SkillDefinition[] | undefined
 }
 export type AgentSpawnInput = {
   prompt: string
@@ -46,6 +48,7 @@ export type AgentMetadata = {
   systemPrompt: readonly string[]
   userContext?: Readonly<Record<string, string>> | undefined
   toolDefinitions?: readonly ModelToolDefinition[] | undefined
+  skills?: readonly SkillDefinition[] | undefined
   worktree?: AgentWorktree | undefined
   worktreeRemoved?: boolean | undefined
   status: AgentStatus

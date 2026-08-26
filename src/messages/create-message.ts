@@ -5,11 +5,14 @@ export type UserTranscriptMessage = {
   agentEventKey?: string
   isMeta?: true
   isCompactSummary?: true
+  skillContext?: SkillContext
   type: 'user'
   uuid: UUID
   timestamp: string
   message: UserMessage
 }
+
+export type SkillContext = { contentHash: string; location: string; name: string }
 
 export type AssistantTranscriptMessage = {
   requestTokenEstimate?: number
@@ -24,6 +27,7 @@ export type TranscriptMessage = UserTranscriptMessage | AssistantTranscriptMessa
 type IdentityOptions = {
   isMeta?: true
   isCompactSummary?: true
+  skillContext?: SkillContext
   now?: () => Date
   uuid?: UUID
 }
@@ -35,6 +39,7 @@ export function createUserMessage(
   return {
     ...(options.isMeta ? { isMeta: true as const } : {}),
     ...(options.isCompactSummary ? { isCompactSummary: true as const } : {}),
+    ...(options.skillContext ? { skillContext: options.skillContext } : {}),
     message: { ...input, role: 'user' },
     timestamp: (options.now ?? (() => new Date()))().toISOString(),
     type: 'user',

@@ -137,6 +137,63 @@ describe('runAgentLoop', () => {
     })
   })
 
+  it('inserts protected Skill context after the matching tool result', async () => {
+    const model = new FakeModelAdapter([
+      [
+        { type: 'message_start', messageId: 'assistant-skill' },
+        {
+          type: 'content_block_start',
+          index: 0,
+          block: { type: 'tool_use', id: 'skill-1', name: 'Skill' },
+        },
+        {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'input_json_delta', partialJson: '{"name":"review"}' },
+        },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_delta', stopReason: 'tool_use', usage: {} },
+        { type: 'message_stop' },
+      ],
+      textResponse('reviewing'),
+    ])
+    const skillContext = {
+      contentHash: 'hash',
+      location: '/skills/review/SKILL.md',
+      name: 'review',
+    }
+
+    const { result } = await drain(
+      runAgentLoop({
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'review it' }] })],
+        model,
+        modelId: 'test-model',
+        systemPrompt: [],
+        tools: [
+          {
+            description: 'Skill',
+            execute: async () => ({
+              content: 'Loaded Skill: review',
+              context: { skillContext, text: '<skill_content>full file</skill_content>' },
+            }),
+            inputSchema: { type: 'object' },
+            isConcurrencySafe: () => false,
+            name: 'Skill',
+          },
+        ],
+      }),
+    )
+
+    const inserted = result.messages.find(
+      (message) => message.type === 'user' && message.skillContext?.name === 'review',
+    )
+    expect(inserted).toMatchObject({ isMeta: true, skillContext })
+    expect(model.requests[1]?.messages.at(-1)).toEqual({
+      role: 'user',
+      content: [{ type: 'text', text: '<skill_content>full file</skill_content>' }],
+    })
+  })
+
   it('feeds a denied tool result back without executing the tool', async () => {
     const model = new FakeModelAdapter([
       [

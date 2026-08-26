@@ -5,6 +5,7 @@ import type { TranscriptMessage } from '../messages/create-message.js'
 import type { PermissionMode } from '../permissions/evaluate-permission.js'
 import type { SessionViewInfo, UiEvent } from './contracts.js'
 import type { DockUiController } from './dock-tui-app.js'
+import type { SkillDefinition, SkillDiagnostic } from '../skills/registry.js'
 
 export type RuntimeSession = Required<
   Pick<
@@ -22,7 +23,16 @@ export type RuntimeSession = Required<
     | 'submit'
   >
 > &
-  Pick<DockUiController, 'getSnapshot' | 'processNotifications' | 'getViewInfo' | 'displayMessages'>
+  Pick<
+    DockUiController,
+    | 'activateSkill'
+    | 'displayMessages'
+    | 'getSnapshot'
+    | 'getViewInfo'
+    | 'processNotifications'
+    | 'skillDiagnostics'
+    | 'skills'
+  >
 
 export class RuntimeController implements DockUiController {
   #controller: RuntimeSession
@@ -37,6 +47,12 @@ export class RuntimeController implements DockUiController {
 
   get permissionMode(): string {
     return this.#controller.permissionMode
+  }
+  get skills(): readonly SkillDefinition[] {
+    return this.#controller.skills ?? []
+  }
+  get skillDiagnostics(): readonly SkillDiagnostic[] {
+    return this.#controller.skillDiagnostics ?? []
   }
 
   abort(reason?: unknown): void {
@@ -58,6 +74,10 @@ export class RuntimeController implements DockUiController {
   }
   async *submit(text: string): AsyncIterable<UiEvent> {
     yield* this.#events(this.#controller.submit(text))
+  }
+  async *activateSkill(name: string, invocationInput?: string): AsyncIterable<UiEvent> {
+    if (!this.#controller.activateSkill) throw new Error('Skills are unavailable')
+    yield* this.#events(this.#controller.activateSkill(name, invocationInput))
   }
   async *#events(source: AsyncIterable<UiEvent>): AsyncIterable<UiEvent> {
     const operationId = randomUUID(),

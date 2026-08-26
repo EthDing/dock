@@ -11,6 +11,8 @@ import type { ModelAdapter } from './model/types.js'
 import type { PermissionModeState } from './permissions/permission-mode-state.js'
 import type { SessionWriter } from './sessions/session-store.js'
 import type { AgentTool, CanUseTool } from './tools/types.js'
+import type { SkillActivator } from './skills/activation.js'
+import type { SkillDefinition, SkillDiagnostic } from './skills/registry.js'
 import type { SessionViewInfo } from './ui/contracts.js'
 
 export class SessionController {
@@ -35,6 +37,9 @@ export class SessionController {
   readonly #contextManager: ContextManager | undefined
   readonly #permissionModeState: PermissionModeState | undefined
   readonly #turnComplete: TurnCompleteWork | undefined
+  readonly #skillActivator: SkillActivator | undefined
+  readonly #skills: readonly SkillDefinition[]
+  readonly #skillDiagnostics: readonly SkillDiagnostic[]
   #messages: TranscriptMessage[]
   #displayMessages: TranscriptMessage[]
   #activeAbortController: AbortController | undefined
@@ -63,6 +68,9 @@ export class SessionController {
     systemPrompt: readonly string[]
     tools: readonly AgentTool[]
     turnComplete?: TurnCompleteWork
+    skillActivator?: SkillActivator
+    skills?: readonly SkillDefinition[]
+    skillDiagnostics?: readonly SkillDiagnostic[]
     userContext?: Readonly<Record<string, string>>
     writer: SessionWriter
   }) {
@@ -80,6 +88,9 @@ export class SessionController {
     this.#systemPrompt = options.systemPrompt
     this.#tools = options.tools
     this.#turnComplete = options.turnComplete
+    this.#skillActivator = options.skillActivator
+    this.#skills = options.skills ?? []
+    this.#skillDiagnostics = options.skillDiagnostics ?? []
     this.#userContext = options.userContext
     this.#writer = options.writer
   }
@@ -128,15 +139,50 @@ export class SessionController {
   }
 
   async *submit(text: string): AsyncGenerator<AgentEvent, AgentLoopResult> {
-    return yield* this.#run(text)
+    return yield* this.#run({ text, userInitiated: true })
   }
 
-  async *#run(text?: string): AsyncGenerator<AgentEvent, AgentLoopResult> {
+  get skills(): readonly SkillDefinition[] {
+    return this.#skills
+  }
+
+  get skillDiagnostics(): readonly SkillDiagnostic[] {
+    return this.#skillDiagnostics
+  }
+
+  async *activateSkill(
+    name: string,
+    invocationInput?: string,
+  ): AsyncGenerator<AgentEvent, AgentLoopResult> {
+    if (!this.#skillActivator) throw new Error('Skills are unavailable')
+    const activation = await this.#skillActivator.activate(name, invocationInput)
+    if (activation.isError) throw new Error(activation.content)
+    const initialMessage = activation.context
+      ? createUserMessage(
+          { content: [{ type: 'text', text: activation.context.text }] },
+          { isMeta: true, skillContext: activation.context.skillContext },
+        )
+      : createUserMessage(
+          { content: [{ type: 'text', text: activation.content }] },
+          { isMeta: true },
+        )
+    return yield* this.#run({ initialMessage, userInitiated: true })
+  }
+
+  async *#run(
+    options: {
+      initialMessage?: UserTranscriptMessage
+      text?: string
+      userInitiated?: boolean
+    } = {},
+  ): AsyncGenerator<AgentEvent, AgentLoopResult> {
     const abortController = this.#beginOperation()
     let generator: ReturnType<typeof runAgentLoop> | undefined
     try {
-      if (text !== undefined) {
-        const userMessage = createUserMessage({ content: [{ text, type: 'text' }] })
+      if (options.text !== undefined || options.initialMessage) {
+        const userMessage =
+          options.initialMessage ??
+          createUserMessage({ content: [{ text: options.text ?? '', type: 'text' }] })
         await this.#fileHistory.makeSnapshot(userMessage.uuid)
         this.#messages.push(userMessage)
         await this.#writer.recordTranscript([userMessage])
@@ -189,7 +235,7 @@ export class SessionController {
       }
       this.#messages = [...next.value.messages]
       await this.#writer.recordTranscript(this.#messages)
-      if (text !== undefined && next.value.reason === 'completed')
+      if (options.userInitiated && next.value.reason === 'completed')
         this.#turnComplete?.schedule(this.#messages, this.#userContext)
       return next.value
     } finally {

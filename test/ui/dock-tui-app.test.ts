@@ -40,6 +40,34 @@ class MemoryTerminal implements Terminal {
 }
 
 describe('DockTuiApp', () => {
+  it('registers dynamic Skill commands and forwards invocation input', async () => {
+    const calls: Array<[string, string | undefined]> = []
+    const controller: DockUiController = {
+      abort: () => {},
+      close: async () => {},
+      skills: [
+        {
+          baseDir: '/skills/review',
+          description: 'Review code',
+          location: '/skills/review/SKILL.md',
+          name: 'review',
+          scope: 'user',
+          source: 'user-dock',
+        },
+      ],
+      async *activateSkill(name, input) {
+        calls.push([name, input])
+        yield* []
+      },
+      async *submit() {},
+    }
+    const app = new DockTuiApp({ controller, tui: new TuiAltScreen(new MemoryTerminal()) })
+
+    await app.submit('/review src/app.ts')
+
+    expect(calls).toEqual([['review', 'src/app.ts']])
+  })
+
   it('offers permanent approval only when the tool provides a persistent rule', async () => {
     const controller: DockUiController = {
       abort: () => {},

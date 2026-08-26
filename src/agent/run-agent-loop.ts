@@ -19,6 +19,7 @@ import type {
   ToolUseBlock,
 } from '../model/types.js'
 import type { AgentTool, AgentToolResult, CanUseTool } from '../tools/types.js'
+import type { SkillActivationContext } from '../skills/activation.js'
 import { buildModelRequest, roughRequestTokens } from './request.js'
 
 export type AgentLoopOptions = {
@@ -43,7 +44,11 @@ export type AgentLoopOptions = {
 }
 
 export type ToolOutcome = 'success' | 'error' | 'denied' | 'aborted'
-type ToolExecutionResult = { result: ToolResultBlock; outcome: ToolOutcome }
+type ToolExecutionResult = {
+  context?: SkillActivationContext
+  result: ToolResultBlock
+  outcome: ToolOutcome
+}
 
 export type AgentEvent =
   | {
@@ -182,6 +187,7 @@ export async function* runAgentLoop(
       }
 
       const toolResults: ToolResultBlock[] = []
+      const additionalContexts: SkillActivationContext[] = []
       for (const batch of partitionToolUses(toolUses, options.tools)) {
         for (const toolUse of batch.toolUses) {
           yield { type: 'tool_execution_start', toolUse }
@@ -236,8 +242,9 @@ export async function* runAgentLoop(
           ]
         }
 
-        for (const { result, outcome } of batchResults) {
+        for (const { context, result, outcome } of batchResults) {
           toolResults.push(result)
+          if (context) additionalContexts.push(context)
           yield { type: 'tool_result', result, outcome }
         }
       }
@@ -245,6 +252,14 @@ export async function* runAgentLoop(
       const toolResultMessage = createUserMessage({ content: toolResults })
       messages.push(toolResultMessage)
       yield { type: 'user_message', message: toolResultMessage }
+      for (const context of additionalContexts) {
+        const contextMessage = createUserMessage(
+          { content: [{ text: context.text, type: 'text' }] },
+          { isMeta: true, skillContext: context.skillContext },
+        )
+        messages.push(contextMessage)
+        yield { type: 'user_message', message: contextMessage }
+      }
     }
 
     return { messages, reason: 'aborted' }
@@ -365,6 +380,7 @@ async function executeToolUse(
   }
 
   return {
+    ...(result.context ? { context: result.context } : {}),
     outcome: signal.aborted ? 'aborted' : result.isError ? 'error' : 'success',
     result: {
       content: result.content,

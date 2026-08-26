@@ -6,6 +6,12 @@ export class CommandRegistry {
   register(name: string, description: string, run: Command['run']): void {
     this.#commands.set(name, { name, description, run })
   }
+  has(name: string): boolean {
+    return this.#commands.has(name)
+  }
+  remove(name: string): void {
+    this.#commands.delete(name)
+  }
   async execute(text: string): Promise<void> {
     const match = text.match(/^\/(\S+)\s*([\s\S]*)$/),
       name = match?.[1] ?? '',

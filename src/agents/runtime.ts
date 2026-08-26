@@ -29,11 +29,16 @@ import { FileReadState } from '../tools/file-read-state.js'
 import type { AgentTool } from '../tools/types.js'
 import type { DockSandbox } from '../sandbox/dock-sandbox.js'
 import type { MemoryManager } from '../memory/memory-manager.js'
+import { findProjectRoot } from '../config/load-settings.js'
+import { createSkillTool, SkillActivator } from '../skills/activation.js'
+import { discoverSkills, inheritedSkillRegistry, isSkillResourcePath } from '../skills/registry.js'
+import { prepareSkillRestoration } from '../skills/context.js'
 
 export type AgentPolicy = { rules: PermissionRules; sessionPermissions: SessionPermissionState }
 export async function createSubagentRuntime(options: {
   metadata: AgentMetadata
   parent?: AgentSnapshot | undefined
+  initialMessages?: readonly import('../messages/create-message.js').TranscriptMessage[]
   manager: SubagentManager
   resolveModel: (
     reference: string,
@@ -69,11 +74,25 @@ export async function createSubagentRuntime(options: {
     readFileState: state,
     writeLifecycle: lifecycle,
   }
+  const projectRoot = await findProjectRoot(meta.cwd)
+  const skillRegistry =
+    meta.contextMode === 'fork' && (meta.skills ?? options.parent?.skills)
+      ? inheritedSkillRegistry(meta.skills ?? options.parent?.skills ?? [], projectRoot)
+      : await discoverSkills({ homeDir: options.homeDir, projectRoot })
+  const skillActivator = new SkillActivator(
+    skillRegistry,
+    options.initialMessages ?? options.parent?.messages ?? [],
+  )
+  const skillTools = skillRegistry.skills.length
+    ? [createSkillTool(skillActivator, skillRegistry)]
+    : []
   const internal = (tool: AgentTool, input: Record<string, unknown>) =>
     typeof input.file_path === 'string' &&
     ((['Read', 'Write', 'Edit'].includes(tool.name) &&
       options.memory.isMemoryPath(input.file_path)) ||
-      (tool.name === 'Read' && options.manager.isOutputPath(meta.sessionId, input.file_path)))
+      (tool.name === 'Read' &&
+        (options.manager.isOutputPath(meta.sessionId, input.file_path) ||
+          isSkillResourcePath(skillRegistry, input.file_path))))
   let tools = [
     createReadTool(deps),
     createWriteTool(deps),
@@ -86,6 +105,7 @@ export async function createSubagentRuntime(options: {
       sandbox: options.sandbox.forCwd(meta.cwd),
     }),
     ...createAgentTools(options.manager),
+    ...skillTools,
   ]
   if (meta.contextMode !== 'fork')
     tools = filterDeniedTools(tools, options.policyFor(meta.sessionId).rules)
@@ -153,7 +173,7 @@ export async function createSubagentRuntime(options: {
     toolResultClearing: { enabled: false },
     summarize: (request) =>
       compactConversation({ ...request, model, transcriptPath: options.transcriptPath }),
-    prepareRestoration: async (signal) => {
+    prepareRestoration: async (messages, signal) => {
       const loaded = await options.loadUserContext(meta.cwd)
       const { AUTO_MEMORY: _memory, ...fresh } = loaded
       const restored = await prepareFileRestoration({
@@ -177,7 +197,11 @@ export async function createSubagentRuntime(options: {
           )
         },
       })
-      return { ...restored, userContext: meta.contextMode === 'fresh' ? fresh : loaded }
+      return {
+        ...restored,
+        attachments: [...restored.attachments, ...prepareSkillRestoration(messages)],
+        userContext: meta.contextMode === 'fresh' ? fresh : loaded,
+      }
     },
   })
   return {
@@ -188,5 +212,6 @@ export async function createSubagentRuntime(options: {
     contextManager,
     fileReadState: state,
     maxOutputTokens: provider.maxOutputTokens,
+    skills: skillRegistry.skills,
   }
 }
