@@ -155,6 +155,7 @@ export class SessionController {
     invocationInput?: string,
   ): AsyncGenerator<AgentEvent, AgentLoopResult> {
     if (!this.#skillActivator) throw new Error('Skills are unavailable')
+    this.#skillActivator.sync(this.#messages)
     const activation = await this.#skillActivator.activate(name, invocationInput)
     if (activation.isError) throw new Error(activation.content)
     const initialMessage = activation.context

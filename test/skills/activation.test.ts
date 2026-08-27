@@ -28,6 +28,9 @@ describe('Skill activation', () => {
     expect(first.context?.skillContext.name).toBe('review')
     expect(second.context).toBeUndefined()
     expect(second.content).toContain('already active')
+
+    activator.sync([])
+    expect((await activator.activate('review')).context).toBeDefined()
   })
 
   it('builds a constrained Skill tool catalog', async () => {

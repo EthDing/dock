@@ -24,6 +24,11 @@ export class SkillActivator {
     readonly registry: SkillRegistry,
     messages: readonly TranscriptMessage[] = [],
   ) {
+    this.sync(messages)
+  }
+
+  sync(messages: readonly TranscriptMessage[]): void {
+    this.#active.clear()
     for (const message of messages)
       if (message.type === 'user' && message.skillContext)
         this.#active.set(message.skillContext.name, message.skillContext.contentHash)
@@ -100,7 +105,10 @@ export function createSkillTool(activator: SkillActivator, registry: SkillRegist
     checkPermissions: () => ({ behavior: 'allow', source: 'tool' }),
     getPermissionRule: (value) => `Skill(${String(value.name)})`,
     isConcurrencySafe: () => false,
-    execute: async (value) => activator.activate(String(value.name)),
+    execute: async (value, execution) => {
+      if (execution.agent?.messages) activator.sync(execution.agent.messages)
+      return activator.activate(String(value.name))
+    },
   }
 }
 
