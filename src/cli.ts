@@ -2,8 +2,8 @@
 
 import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-
-export const DOCK_VERSION = '0.0.0'
+import { DOCK_VERSION } from './version.js'
+export { DOCK_VERSION } from './version.js'
 
 export type CliIo = {
   stderr: (chunk: string) => void

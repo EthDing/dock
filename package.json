@@ -1,11 +1,16 @@
 {
   "name": "dock",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "bin": {
     "dock": "dist/cli.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.74",
     "@anthropic-ai/sdk": "0.121.0",
@@ -26,8 +31,10 @@
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome lint .",
+    "package:release": "node scripts/package-release.mjs",
     "preview:tui": "tsx scripts/preview-tui.mts",
     "test": "vitest run && pnpm --filter @dock/tui test",
+    "test:installer": "node scripts/test-installer.mjs",
     "test:sandbox": "DOCK_SANDBOX_INTEGRATION=1 vitest run test/sandbox/sandbox-integration.test.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

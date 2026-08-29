@@ -1,5 +1,6 @@
 import { type Component, truncateToWidth, visibleWidth } from '@dock/tui'
 import type { SessionViewInfo } from '../contracts.js'
+import { DOCK_VERSION } from '../../version.js'
 import {
   bg,
   paint as color,
@@ -71,7 +72,7 @@ export class Brand implements Component {
     const logo = renderCaseLogo(size),
       logoWidth = size * 3 + 3
     const details = [
-      `${color('Dock', palette.text)}  ${muted('0.0.0')}`,
+      `${color('Dock', palette.text)}  ${muted(DOCK_VERSION)}`,
       safeText(info.cwd),
       muted(safeText(info.modelReference)),
     ]

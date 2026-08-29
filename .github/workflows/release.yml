@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: corepack enable
+      - run: corepack prepare pnpm@10.34.5 --activate
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap socat ripgrep
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run ci
+        env:
+          DOCK_SANDBOX_INTEGRATION: "1"
+      - run: pnpm package:release
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          .release/dock-linux.tar.gz
+          .release/dock-linux.tar.gz.sha256
+          --repo "$GITHUB_REPOSITORY"
+          --generate-notes

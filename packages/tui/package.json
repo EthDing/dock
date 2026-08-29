@@ -16,6 +16,8 @@
 	},
 	"files": [
 		"dist/**/*",
+		"LICENSE",
+		"UPSTREAM.md",
 		"native/win32/prebuilds/**/*.node",
 		"native/win32/src/**/*.c",
 		"native/win32/build.mjs",

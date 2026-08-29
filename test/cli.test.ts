@@ -15,7 +15,7 @@ describe('dock CLI', () => {
     })
 
     expect(exitCode).toBe(0)
-    expect(output).toEqual(['0.0.0\n'])
+    expect(output).toEqual(['0.1.0\n'])
   })
 
   it('recognizes invocation through an installed bin symlink', async () => {
