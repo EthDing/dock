@@ -18,5 +18,3 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap socat ripgrep
       - run: pnpm install --frozen-lockfile
       - run: pnpm run ci
-        env:
-          DOCK_SANDBOX_INTEGRATION: "1"
