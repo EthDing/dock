@@ -96,16 +96,17 @@ describe('file and search tool permissions', () => {
 describe('Bash permissions', () => {
   const bash = createBashTool({ cwd: '/work', homeDir: '/home/user' })
 
-  it('keeps the current read-only subset and passes unknown commands through', async () => {
+  it('passes all ordinary commands through without a shell parser', async () => {
     await expect(
       resolvePermission(bash, { command: 'git status' }, context()),
-    ).resolves.toMatchObject({ behavior: 'allow' })
+    ).resolves.toMatchObject({ behavior: 'ask', source: 'fallback' })
     await expect(
       resolvePermission(bash, { command: 'npm test' }, context()),
     ).resolves.toMatchObject({ behavior: 'ask', source: 'fallback' })
+    expect(bash.isConcurrencySafe({ command: 'git status' })).toBe(false)
   })
 
-  it('denies non-read-only commands in plan mode', async () => {
+  it('denies passthrough commands in plan mode', async () => {
     await expect(
       resolvePermission(bash, { command: 'npm test' }, context({ mode: 'plan' })),
     ).resolves.toMatchObject({ behavior: 'deny', source: 'mode' })

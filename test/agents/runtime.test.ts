@@ -15,6 +15,8 @@ import { PermissionModeState } from '../../src/permissions/permission-mode-state
 import { PermissionBroker } from '../../src/permissions/permission-broker.js'
 import { SessionPermissionState } from '../../src/permissions/session-permission-state.js'
 import type { ModelAdapter, ModelStreamEvent } from '../../src/model/types.js'
+import { UserInteractionBroker } from '../../src/interaction/user-interaction-broker.js'
+import { TaskStore } from '../../src/tasks/task-store.js'
 const response = (text: string): ModelStreamEvent[] => [
   { type: 'message_start', messageId: 'r' },
   { type: 'content_block_start', index: 0, block: { type: 'text' } },
@@ -61,6 +63,8 @@ async function setup(
     policyFor: () => policy,
     permissionMode: mode,
     permissionBroker: broker,
+    userInteractionBroker: new UserInteractionBroker(),
+    taskStore: new TaskStore(join(configDir, 'tasks.json')),
     sandbox,
     memory,
     homeDir: cwd,

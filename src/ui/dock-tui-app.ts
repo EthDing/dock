@@ -9,6 +9,11 @@ import {
 } from '@dock/tui'
 import type { AgentSnapshot, AgentUiUpdate, AgentView } from '../agents/types.js'
 import type { MemoryNotificationBroker } from '../memory/memory-notification-broker.js'
+import type {
+  UserInteractionBroker,
+  UserInteractionRequest,
+  UserInteractionResponse,
+} from '../interaction/user-interaction-broker.js'
 import type { TranscriptMessage } from '../messages/create-message.js'
 import type { PermissionMode } from '../permissions/evaluate-permission.js'
 import type {
@@ -26,6 +31,7 @@ import { CommandRegistry } from './commands.js'
 import { Brand, type LogoRows } from './components/brand.js'
 import { FullscreenView } from './components/fullscreen-view.js'
 import { type Choice, InteractionPanel } from './components/interaction-panel.js'
+import { TextInputPanel } from './components/interaction-panel.js'
 import { TaskList } from './components/task-list.js'
 import { TranscriptView } from './components/transcript.js'
 import type { SessionViewInfo, UiEvent } from './contracts.js'
@@ -33,6 +39,7 @@ import type { SkillDefinition, SkillDiagnostic } from '../skills/registry.js'
 import { muted, safeText } from './presentation.js'
 import { editorTheme } from './themes.js'
 import { TranscriptState } from './transcript-state.js'
+import type { WorkTask } from '../tasks/task-store.js'
 
 export type DockUiController = {
   getSnapshot?: () => AgentSnapshot
@@ -73,6 +80,10 @@ export type DockSandboxCommands = {
   getMode: () => DockSandboxMode
   setMode: (mode: DockSandboxMode) => Promise<void>
 }
+export type DockTaskCommands = {
+  list: () => Promise<WorkTask[]>
+  get: (id: string) => Promise<WorkTask | undefined>
+}
 
 export type DockAgentCommands = {
   list: () => Promise<AgentView[]>
@@ -100,6 +111,7 @@ export class DockTuiApp {
   readonly #sessionCommands: DockSessionCommands | undefined
   readonly #sandboxCommands: DockSandboxCommands | undefined
   readonly #agents: DockAgentCommands | undefined
+  readonly #workTasks: DockTaskCommands | undefined
   readonly #preview: { logoRows?: () => LogoRows; helper?: string | (() => string) } | undefined
   #main: TranscriptState
   #mainView: TranscriptView
@@ -109,7 +121,7 @@ export class DockTuiApp {
   #activeRun: string | undefined
   #activeSequence = -1
   #taskList: TaskList | undefined
-  #panel: InteractionPanel | undefined
+  #panel: InteractionPanel | TextInputPanel | undefined
   #panelCount = 0
   #panelTail: Promise<unknown> = Promise.resolve()
   #cancelPanel: (() => void) | undefined
@@ -141,12 +153,15 @@ export class DockTuiApp {
     permissionBroker?: PermissionBroker
     sandboxNetworkPermissionBroker?: SandboxNetworkPermissionBroker
     memoryNotificationBroker?: MemoryNotificationBroker
+    userInteractionBroker?: UserInteractionBroker
+    taskCommands?: DockTaskCommands
     startupNotices?: readonly string[]
     preview?: { logoRows?: () => LogoRows; helper?: string | (() => string) }
   }) {
     this.#controller = options.controller
     this.#tui = options.tui
     this.#agents = options.agentCommands
+    this.#workTasks = options.taskCommands
     this.#sessionCommands = options.sessionCommands
     this.#sandboxCommands = options.sandboxCommands
     this.#preview = options.preview
@@ -211,6 +226,7 @@ export class DockTuiApp {
     this.#tui.setFocus(this.#editor)
     this.#tui.addInputListener((data) => this.#input(data), { prepend: true })
     options.permissionBroker?.setHandler((request) => this.#requestPermission(request))
+    options.userInteractionBroker?.setHandler((request) => this.#requestUserInteraction(request))
     options.sandboxNetworkPermissionBroker?.setHandler((request) => this.#requestNetwork(request))
     options.memoryNotificationBroker?.setHandler((notification) => {
       if (
@@ -354,6 +370,16 @@ export class DockTuiApp {
       this.#tui.requestRender()
       return { consume: true }
     }
+    if (matchesKey(data, Key.ctrl('t'))) {
+      if (this.#taskList) this.#returnMain()
+      else {
+        this.#returnMain()
+        this.#taskList = new TaskList()
+        void this.#loadTasks().catch((e) => this.#error(e))
+        this.#screen.scroll.scrollToStart()
+      }
+      return { consume: true }
+    }
     if (this.#taskList) {
       if (matchesKey(data, Key.escape)) {
         this.#returnMain()
@@ -369,10 +395,13 @@ export class DockTuiApp {
         )
       else if (matchesKey(data, Key.enter)) {
         const item = this.#taskList.items[this.#taskList.selected]
-        if (item) void this.#openTask(item.id).catch((e) => this.#error(e))
+        if (item)
+          void (
+            item.kind === 'agent' ? this.#openTask(item.id) : this.#openWorkTask(item.id)
+          ).catch((e) => this.#error(e))
       } else if (data === 'x') {
         const item = this.#taskList.items[this.#taskList.selected]
-        if (item)
+        if (item?.kind === 'agent')
           void this.#agents
             ?.stop(item.id)
             .then(() => this.#loadTasks())
@@ -473,6 +502,7 @@ export class DockTuiApp {
         this.#busy = false
         this.#refresh()
         this.#tui.requestRender()
+        if (this.#taskList) await this.#loadTasks()
       }
     })()
     this.#mainTask = work
@@ -771,6 +801,119 @@ export class DockTuiApp {
       })
     }
   }
+  async #promptText(
+    title: string,
+    body: string,
+    signal?: AbortSignal,
+  ): Promise<string | undefined> {
+    this.#panelCount++
+    const job = this.#panelTail.then(async () => {
+      if (this.#closing || signal?.aborted) return undefined
+      return new Promise<string | undefined>((resolve) => {
+        const panel = new TextInputPanel(title, body)
+        this.#panel = panel
+        let done = false
+        const finish = (value?: string) => {
+          if (done) return
+          done = true
+          signal?.removeEventListener('abort', cancel)
+          this.#panel = undefined
+          this.#cancelPanel = undefined
+          this.#tui.setFocus(this.#editor)
+          this.#tui.requestRender()
+          resolve(value?.trim() || undefined)
+        }
+        const cancel = () => finish()
+        this.#cancelPanel = cancel
+        panel.onSubmit = finish
+        panel.onCancel = cancel
+        signal?.addEventListener('abort', cancel, { once: true })
+        this.#editor.focused = false
+        this.#tui.setFocus(panel)
+        this.#tui.requestRender()
+        if (signal?.aborted) cancel()
+      })
+    })
+    this.#panelTail = job.catch(() => {})
+    try {
+      return await job
+    } finally {
+      this.#panelCount--
+      this.#refresh()
+    }
+  }
+  async #requestUserInteraction(request: UserInteractionRequest): Promise<UserInteractionResponse> {
+    if (request.type === 'plan') {
+      const selected = await this.#choose(
+        `Plan ready · ${request.requester.label}`,
+        request.plan,
+        [
+          { label: 'Approve · default permissions', value: 'default' },
+          { label: 'Approve · accept edits', value: 'acceptEdits' },
+          { label: 'Keep planning with feedback', value: 'feedback' },
+          { label: 'Cancel', value: 'cancel' },
+        ],
+        request.signal,
+      )
+      if (selected === 'default') return { type: 'plan', decision: 'approve_default' }
+      if (selected === 'acceptEdits') return { type: 'plan', decision: 'approve_accept_edits' }
+      if (selected === 'feedback') {
+        const feedback = await this.#promptText('Plan feedback', request.plan, request.signal)
+        return feedback
+          ? { type: 'plan', decision: 'feedback', feedback }
+          : { type: 'plan', decision: 'cancel' }
+      }
+      return { type: 'plan', decision: 'cancel' }
+    }
+    const answers: Record<string, string | string[]> = {}
+    for (const question of request.questions) {
+      if (!question.multiSelect) {
+        const selected = await this.#choose(
+          `${question.header} · ${request.requester.label}`,
+          question.question,
+          [
+            ...question.options.map((option) => ({
+              label: `${option.label} · ${option.description}`,
+              value: option.label,
+            })),
+            { label: 'Other…', value: '__other__' },
+          ],
+          request.signal,
+        )
+        if (!selected) throw new Error('User interaction cancelled')
+        answers[question.question] =
+          selected === '__other__'
+            ? ((await this.#promptText(question.header, question.question, request.signal)) ?? '')
+            : selected
+        continue
+      }
+      const selected = new Set<string>()
+      while (true) {
+        const value = await this.#choose(
+          `${question.header} · ${request.requester.label}`,
+          question.question,
+          [
+            ...question.options.map((option) => ({
+              label: `${selected.has(option.label) ? '[x]' : '[ ]'} ${option.label} · ${option.description}`,
+              value: option.label,
+            })),
+            { label: 'Other…', value: '__other__' },
+            { label: 'Done', value: '__done__' },
+          ],
+          request.signal,
+        )
+        if (!value) throw new Error('User interaction cancelled')
+        if (value === '__done__') break
+        if (value === '__other__') {
+          const other = await this.#promptText(question.header, question.question, request.signal)
+          if (other) selected.add(other)
+        } else if (selected.has(value)) selected.delete(value)
+        else selected.add(value)
+      }
+      answers[question.question] = [...selected]
+    }
+    return { type: 'questions', answers }
+  }
   async #requestPermission(request: PermissionRequest): Promise<PermissionApproval> {
     const owner = request.requester
       ? `Agent ${request.requester.label} [${request.requester.agentId}]`
@@ -842,11 +985,30 @@ export class DockTuiApp {
     await this.#openTask(action)
   }
   async #loadTasks(): Promise<void> {
-    const generation = this.#generation,
-      items = (await this.#agents?.list()) ?? []
+    const generation = this.#generation
+    const [agents, tasks] = await Promise.all([
+      this.#agents?.list() ?? Promise.resolve([]),
+      this.#workTasks?.list() ?? Promise.resolve([]),
+    ])
     if (generation !== this.#generation || this.#closing) return
-    this.#taskList?.update(items)
+    this.#taskList?.update(tasks, agents)
     this.#refresh()
+  }
+  async #openWorkTask(id: string): Promise<void> {
+    const task = await this.#workTasks?.get(id)
+    if (!task) throw new Error(`Unknown task ${id}`)
+    await this.#choose(
+      `${task.subject} · ${task.status}`,
+      [
+        task.description,
+        task.owner ? `Owner: ${task.owner}` : '',
+        task.blockedBy.length ? `Blocked by: ${task.blockedBy.join(', ')}` : '',
+        task.blocks.length ? `Blocks: ${task.blocks.join(', ')}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n'),
+      [{ label: 'Back', value: 'back' }],
+    )
   }
   #saveDraft(): void {
     this.#drafts.set(
@@ -919,9 +1081,7 @@ export class DockTuiApp {
       if (this.#snapshotBuffer?.id === update.agentId) this.#snapshotBuffer.updates.push(update)
       else this.#applyAgent(update)
       if (this.#taskList) {
-        const items = this.#taskList.items.filter((a) => a.id !== update.agentId)
-        items.push(update.agent)
-        this.#taskList.update(items)
+        void this.#loadTasks().catch((e) => this.#error(e))
       }
       this.#refresh()
     })

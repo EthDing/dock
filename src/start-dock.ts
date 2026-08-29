@@ -27,6 +27,7 @@ import { prepareFileRestoration } from './context/restore-context.js'
 import { ExtractMemories } from './memory/extract-memories.js'
 import { MemoryManager } from './memory/memory-manager.js'
 import { MemoryNotificationBroker } from './memory/memory-notification-broker.js'
+import { UserInteractionBroker } from './interaction/user-interaction-broker.js'
 import { createModelAdapter, getApiKeyEnvironmentName } from './model/create-model-adapter.js'
 import type { ModelAdapter } from './model/types.js'
 import { createCanUseTool } from './permissions/can-use-tool.js'
@@ -57,6 +58,10 @@ import { createSkillTool, SkillActivator } from './skills/activation.js'
 import { discoverSkills, isSkillResourcePath } from './skills/registry.js'
 import { prepareSkillRestoration } from './skills/context.js'
 import type { AgentTool, CanUseTool } from './tools/types.js'
+import { createInteractionTools } from './tools/interaction-tools.js'
+import { createTaskTools } from './tools/task-tools.js'
+import { createWebFetchTool } from './tools/web-fetch-tool.js'
+import { getTaskStorePath, TaskStore } from './tasks/task-store.js'
 import { type DockSessionCommands, DockTuiApp } from './ui/dock-tui-app.js'
 import { RuntimeController } from './ui/runtime-controller.js'
 
@@ -220,10 +225,20 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     }
   }
   const permissionBroker = new PermissionBroker()
+  const userInteractionBroker = new UserInteractionBroker()
   const permissionMode =
     cli.permissionMode ?? loadedSettings.settings.permissions?.defaultMode ?? 'default'
   const permissionModeState = new PermissionModeState(permissionMode)
   const policies = new Map<SessionId, AgentPolicy>()
+  const taskStores = new Map<SessionId, TaskStore>()
+  const taskStoreFor = (id: SessionId): TaskStore => {
+    let store = taskStores.get(id)
+    if (!store) {
+      store = new TaskStore(getTaskStorePath({ configDir, cwd, sessionId: id }))
+      taskStores.set(id, store)
+    }
+    return store
+  }
   const policyFor = (id: SessionId): AgentPolicy => {
     let policy = policies.get(id)
     if (!policy) {
@@ -280,6 +295,8 @@ export async function startDock(options: StartDockOptions): Promise<void> {
         policyFor,
         permissionMode: permissionModeState,
         permissionBroker,
+        userInteractionBroker,
+        taskStore: taskStoreFor(metadata.storageSessionId),
         sandbox,
         memory,
         homeDir,
@@ -336,6 +353,20 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     const skillTools = skillRegistry.skills.length
       ? [createSkillTool(skillActivator, skillRegistry)]
       : []
+    const additionalTools = [
+      ...createInteractionTools({
+        broker: userInteractionBroker,
+        mode: permissionModeState,
+        includePlan: true,
+        allowPlan: true,
+      }),
+      ...createTaskTools(taskStoreFor(targetSessionId)),
+      createWebFetchTool({
+        model,
+        modelId,
+        ...(provider.maxOutputTokens ? { maxOutputTokens: provider.maxOutputTokens } : {}),
+      }),
+    ]
     const tools = filterDeniedTools(
       [
         createReadTool(fileDependencies),
@@ -346,6 +377,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
         createBashTool({ cwd, homeDir, sandbox }),
         ...createAgentTools(agents),
         ...skillTools,
+        ...additionalTools,
       ],
       permissionRules,
     )
@@ -367,6 +399,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
         createBashTool({ cwd, homeDir, sandbox }),
         ...createAgentTools(agents),
         ...skillTools,
+        ...additionalTools,
       ],
       permissionRules,
     )
@@ -493,6 +526,7 @@ export async function startDock(options: StartDockOptions): Promise<void> {
         sourceSessionId: currentSessionId,
         targetSessionId,
       })
+      await taskStoreFor(currentSessionId).copyTo(taskStoreFor(targetSessionId))
       await runtime.replace(() => createController(targetSessionId, currentModelReference))
       currentSessionId = targetSessionId
     },
@@ -576,6 +610,11 @@ export async function startDock(options: StartDockOptions): Promise<void> {
     },
     memoryNotificationBroker,
     permissionBroker,
+    userInteractionBroker,
+    taskCommands: {
+      list: () => taskStoreFor(currentSessionId).list(),
+      get: (id) => taskStoreFor(currentSessionId).get(id),
+    },
     sandboxNetworkPermissionBroker,
     sandboxCommands,
     sessionCommands,

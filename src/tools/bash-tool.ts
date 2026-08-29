@@ -108,9 +108,6 @@ export function createBashTool(options: {
       ) {
         return { behavior: 'allow', source: 'internal', updatedInput: input }
       }
-      if (context.mode !== 'dontAsk' && isReadOnlyBashCommand(command)) {
-        return { behavior: 'allow', source: 'tool', updatedInput: input }
-      }
       const allowRule = findContentRule(context.rules, 'allow', tool.name, matchesSpecifier)
       if (allowRule) {
         return { behavior: 'allow', rule: allowRule, source: 'rule', updatedInput: input }
@@ -119,8 +116,7 @@ export function createBashTool(options: {
     },
     getPermissionRule: (input) =>
       typeof input.command === 'string' ? `Bash(${input.command})` : undefined,
-    isConcurrencySafe: (input) =>
-      typeof input.command === 'string' && isReadOnlyBashCommand(input.command),
+    isConcurrencySafe: () => false,
     name: 'Bash',
     parseInput: (input) => inputSchema.parse(input),
   }

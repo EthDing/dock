@@ -33,6 +33,11 @@ import { findProjectRoot } from '../config/load-settings.js'
 import { createSkillTool, SkillActivator } from '../skills/activation.js'
 import { discoverSkills, inheritedSkillRegistry, isSkillResourcePath } from '../skills/registry.js'
 import { prepareSkillRestoration } from '../skills/context.js'
+import type { UserInteractionBroker } from '../interaction/user-interaction-broker.js'
+import type { TaskStore } from '../tasks/task-store.js'
+import { createInteractionTools } from '../tools/interaction-tools.js'
+import { createTaskTools } from '../tools/task-tools.js'
+import { createWebFetchTool } from '../tools/web-fetch-tool.js'
 
 export type AgentPolicy = { rules: PermissionRules; sessionPermissions: SessionPermissionState }
 export async function createSubagentRuntime(options: {
@@ -47,6 +52,8 @@ export async function createSubagentRuntime(options: {
   policyFor: (sessionId: SessionId) => AgentPolicy
   permissionMode: PermissionModeState
   permissionBroker: PermissionBroker
+  userInteractionBroker: UserInteractionBroker
+  taskStore: TaskStore
   sandbox: DockSandbox
   memory: MemoryManager
   homeDir: string
@@ -106,6 +113,18 @@ export async function createSubagentRuntime(options: {
     }),
     ...createAgentTools(options.manager),
     ...skillTools,
+    ...createInteractionTools({
+      broker: options.userInteractionBroker,
+      mode: options.permissionMode,
+      includePlan: meta.contextMode === 'fork',
+      allowPlan: false,
+    }),
+    ...createTaskTools(options.taskStore),
+    createWebFetchTool({
+      model,
+      modelId,
+      ...(provider.maxOutputTokens ? { maxOutputTokens: provider.maxOutputTokens } : {}),
+    }),
   ]
   if (meta.contextMode !== 'fork')
     tools = filterDeniedTools(tools, options.policyFor(meta.sessionId).rules)

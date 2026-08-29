@@ -7,7 +7,7 @@ import {
   VStack,
 } from '@dock/tui'
 import { accent, muted, safeText } from '../presentation.js'
-import type { InteractionPanel } from './interaction-panel.js'
+type BottomPanel = Component & { maxHeight: number }
 export class FullscreenView {
   readonly scroll: ScrollView
   readonly root: VStack
@@ -16,7 +16,7 @@ export class FullscreenView {
       tui: TuiAltScreen
       editor: Editor
       body: () => Component
-      panel: () => InteractionPanel | undefined
+      panel: () => BottomPanel | undefined
       status: () => string
       target: () => string
       helper: () => string

@@ -1,4 +1,12 @@
-import { type Component, Key, matchesKey, Text, truncateToWidth } from '@dock/tui'
+import {
+  type Component,
+  type Focusable,
+  Input,
+  Key,
+  matchesKey,
+  Text,
+  truncateToWidth,
+} from '@dock/tui'
 import { accent, muted, safeText } from '../presentation.js'
 export type Choice = { value: string; label: string; description?: string }
 export class InteractionPanel implements Component {
@@ -60,6 +68,45 @@ export class InteractionPanel implements Component {
       ),
     ]
       .slice(0, height)
+      .map((line) => truncateToWidth(line, width))
+  }
+}
+
+export class TextInputPanel implements Component, Focusable {
+  readonly input = new Input()
+  maxHeight = 8
+  onSubmit: ((value: string) => void) | undefined
+  onCancel: (() => void) | undefined
+  constructor(
+    readonly title: string,
+    readonly body: string,
+  ) {
+    this.input.onSubmit = (value) => this.onSubmit?.(value)
+    this.input.onEscape = () => this.onCancel?.()
+  }
+  get focused(): boolean {
+    return this.input.focused
+  }
+  set focused(value: boolean) {
+    this.input.focused = value
+  }
+  invalidate(): void {
+    this.input.invalidate?.()
+  }
+  handleInput(data: string): void {
+    this.input.handleInput(data)
+  }
+  render(width: number): string[] {
+    const body = new Text(safeText(this.body), 0, 0)
+      .render(Math.max(1, width - 2))
+      .slice(0, Math.max(0, this.maxHeight - 3))
+    return [
+      accent(safeText(this.title)),
+      ...body.map(muted),
+      ...this.input.render(Math.max(1, width - 2)).map((line) => `› ${line}`),
+      muted('Enter submit · Esc cancel'),
+    ]
+      .slice(0, this.maxHeight)
       .map((line) => truncateToWidth(line, width))
   }
 }
