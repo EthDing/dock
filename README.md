@@ -24,6 +24,8 @@ dock
 如需启用 Bash sandbox，请先在 Ubuntu 安装 `bubblewrap`、`socat` 和 `ripgrep`，然后运行
 `/sandbox`。
 
+更多使用说明见 [Dock 用户文档](docs/README.md)。
+
 ## 开发
 
 ```bash
