@@ -26,7 +26,7 @@
   "packageManager": "pnpm@10.34.5",
   "scripts": {
     "build": "pnpm --filter @dock/tui build && tsc -p tsconfig.build.json && node scripts/make-cli-executable.mjs",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm --filter @dock/tui typecheck",
+    "check": "pnpm --filter @dock/tui build && pnpm format:check && pnpm lint && pnpm typecheck && pnpm --filter @dock/tui typecheck",
     "ci": "pnpm check && pnpm test && pnpm build",
     "format": "biome format --write .",
     "format:check": "biome format .",
