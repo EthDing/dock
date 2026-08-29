@@ -119,6 +119,9 @@ class MessageComponent implements Component {
     if (!visible) return []
     const role = message.type === 'assistant' ? 'Dock' : message.isMeta ? 'System' : 'You'
     const result = [message.type === 'assistant' ? accent(role) : muted(role)]
+    const toolCalls = content.filter((block) => block.type === 'tool_use')
+    const groupedTools = message.type === 'assistant' && toolCalls.length > 1 && !this.detailed()
+    let renderedGroup = false
     for (const block of content) {
       if (block.type === 'text') {
         const text = safeText(block.text)
@@ -127,6 +130,12 @@ class MessageComponent implements Component {
         result.push(muted(`Thinking${this.detailed() ? '' : ' · Ctrl+O to expand'}`))
         if (this.detailed()) result.push(...lines(block.thinking, width).map(muted))
       } else if (block.type === 'tool_use') {
+        if (groupedTools) {
+          if (renderedGroup) continue
+          renderedGroup = true
+          result.push(...renderToolGroup(toolCalls, this.state, width))
+          continue
+        }
         const tool = this.state.tool(block.id) ?? { call: block, status: 'queued', revision: 0 }
         result.push(...new ToolComponent(tool, this.detailed).render(width))
       }
@@ -135,6 +144,35 @@ class MessageComponent implements Component {
     result.push('')
     return result
   }
+}
+
+function renderToolGroup(
+  calls: readonly Extract<
+    MessageItem['message']['message']['content'][number],
+    { type: 'tool_use' }
+  >[],
+  state: TranscriptState,
+  width: number,
+): string[] {
+  const tools = calls.map(
+    (call) => state.tool(call.id) ?? { call, status: 'queued' as const, revision: 0 },
+  )
+  const names = new Map<string, number>()
+  const statuses = new Map<string, number>()
+  for (const tool of tools) {
+    const name = tool.call?.name ?? 'Tool'
+    names.set(name, (names.get(name) ?? 0) + 1)
+    statuses.set(tool.status, (statuses.get(tool.status) ?? 0) + 1)
+  }
+  const nameSummary = [...names].map(([name, count]) => `${name} ×${count}`).join(' · ')
+  const statusSummary = [...statuses].map(([status, count]) => `${count} ${status}`).join(' · ')
+  const lines = [muted(`  ${calls.length} tools · ${nameSummary} · ${statusSummary}`)]
+  const exceptional = tools.filter((tool) =>
+    ['running', 'permission', 'denied', 'aborted', 'error'].includes(tool.status),
+  )
+  for (const tool of exceptional) lines.push(...new ToolComponent(tool, () => false).render(width))
+  lines.push(muted('    Ctrl+O to expand'))
+  return lines
 }
 export class TranscriptView implements Component {
   #cache = new WeakMap<DisplayItem, { version: string; lines: string[] }>()
