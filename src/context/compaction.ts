@@ -4,6 +4,7 @@ import {
   type UserTranscriptMessage,
 } from '../messages/create-message.js'
 import { collectAssistantResponse } from '../model/stream-response.js'
+import { DEFAULT_MAX_OUTPUT_TOKENS } from '../model/output-tokens.js'
 import type { AssistantMessage, ModelAdapter, ModelRequest, Usage } from '../model/types.js'
 import type { SkillRestorationMetadata } from '../skills/context.js'
 import {
@@ -87,7 +88,10 @@ export async function compactConversation(
           options.model,
           {
             ...options.request,
-            maxOutputTokens: Math.min(options.request.maxOutputTokens ?? 8192, 20_000),
+            maxOutputTokens: Math.min(
+              options.request.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+              20_000,
+            ),
             messages: [...prefix, summaryRequest],
             cachePrefixMessageCount: prefix.length,
           },
@@ -106,7 +110,10 @@ export async function compactConversation(
           options.model,
           {
             ...options.request,
-            maxOutputTokens: Math.min(options.request.maxOutputTokens ?? 8192, 20_000),
+            maxOutputTokens: Math.min(
+              options.request.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+              20_000,
+            ),
             systemPrompt: ['You are a helpful AI assistant tasked with summarizing conversations.'],
             messages: [...history.map((message) => message.message), summaryRequest],
             tools: options.request.tools.filter((tool) => tool.name === 'Read'),

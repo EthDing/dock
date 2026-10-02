@@ -1,4 +1,5 @@
 import type { ModelAdapter, ModelRequest, ModelStreamEvent, StopReason, Usage } from './types.js'
+import { DEFAULT_MAX_OUTPUT_TOKENS, rethrowWithOutputTokenHint } from './output-tokens.js'
 
 type AnthropicClient = {
   messages: {
@@ -18,17 +19,19 @@ export class AnthropicMessagesAdapter implements ModelAdapter {
     options: { signal: AbortSignal },
   ): AsyncGenerator<ModelStreamEvent> {
     const cached = prepareCachedPayload(request)
-    const stream = await this.#client.messages.create(
-      {
-        max_tokens: request.maxOutputTokens ?? 8192,
-        messages: cached.messages,
-        model: request.modelId,
-        stream: true,
-        system: cached.system,
-        tools: cached.tools,
-      },
-      { signal: options.signal },
-    )
+    const stream = await this.#client.messages
+      .create(
+        {
+          max_tokens: request.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+          messages: cached.messages,
+          model: request.modelId,
+          stream: true,
+          system: cached.system,
+          tools: cached.tools,
+        },
+        { signal: options.signal },
+      )
+      .catch(rethrowWithOutputTokenHint)
 
     for await (const value of stream) {
       const event = asObject(value)

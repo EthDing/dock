@@ -6,6 +6,7 @@ import { ContextManager } from '../context/context-manager.js'
 import { compactConversation } from '../context/compaction.js'
 import { prepareFileRestoration } from '../context/restore-context.js'
 import type { ModelAdapter } from '../model/types.js'
+import { DEFAULT_MAX_OUTPUT_TOKENS } from '../model/output-tokens.js'
 import type { ProviderSettings } from '../config/load-settings.js'
 import { createCanUseTool } from '../permissions/can-use-tool.js'
 import {
@@ -189,7 +190,7 @@ export async function createSubagentRuntime(options: {
   }
   const contextManager = new ContextManager({
     contextWindow: provider.contextWindow ?? 200_000,
-    maxOutputTokens: provider.maxOutputTokens ?? 8192,
+    maxOutputTokens: provider.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
     toolResultClearing: { enabled: false },
     summarize: (request) =>
       compactConversation({ ...request, model, transcriptPath: options.transcriptPath }),
@@ -233,7 +234,7 @@ export async function createSubagentRuntime(options: {
     canUseTool,
     contextManager,
     fileReadState: state,
-    maxOutputTokens: provider.maxOutputTokens,
+    maxOutputTokens: provider.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
     skills: skillRegistry.skills,
   }
 }

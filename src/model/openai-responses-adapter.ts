@@ -1,4 +1,5 @@
 import type { ModelAdapter, ModelRequest, ModelStreamEvent, StopReason, Usage } from './types.js'
+import { DEFAULT_MAX_OUTPUT_TOKENS, rethrowWithOutputTokenHint } from './output-tokens.js'
 
 type OpenAIClient = {
   responses: {
@@ -17,23 +18,25 @@ export class OpenAIResponsesAdapter implements ModelAdapter {
     request: ModelRequest,
     options: { signal: AbortSignal },
   ): AsyncGenerator<ModelStreamEvent> {
-    const stream = await this.#client.responses.create(
-      {
-        input: toResponsesInput(request),
-        instructions: request.systemPrompt.join('\n\n'),
-        max_output_tokens: request.maxOutputTokens,
-        model: request.modelId,
-        stream: true,
-        tools: request.tools.map((tool) => ({
-          description: tool.description,
-          name: tool.name,
-          parameters: tool.inputSchema,
-          strict: true,
-          type: 'function',
-        })),
-      },
-      { signal: options.signal },
-    )
+    const stream = await this.#client.responses
+      .create(
+        {
+          input: toResponsesInput(request),
+          instructions: request.systemPrompt.join('\n\n'),
+          max_output_tokens: request.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+          model: request.modelId,
+          stream: true,
+          tools: request.tools.map((tool) => ({
+            description: tool.description,
+            name: tool.name,
+            parameters: tool.inputSchema,
+            strict: true,
+            type: 'function',
+          })),
+        },
+        { signal: options.signal },
+      )
+      .catch(rethrowWithOutputTokenHint)
 
     const blocks = new Map<number, { index: number; itemId?: string; type: 'text' | 'tool' }>()
     let nextIndex = 0

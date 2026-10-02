@@ -1,4 +1,5 @@
 import type { ModelAdapter, ModelRequest, ModelStreamEvent, StopReason, Usage } from './types.js'
+import { DEFAULT_MAX_OUTPUT_TOKENS, rethrowWithOutputTokenHint } from './output-tokens.js'
 
 type OpenAIChatClient = {
   chat: {
@@ -19,25 +20,27 @@ export class OpenAIChatAdapter implements ModelAdapter {
     request: ModelRequest,
     options: { signal: AbortSignal },
   ): AsyncGenerator<ModelStreamEvent> {
-    const stream = await this.#client.chat.completions.create(
-      {
-        max_completion_tokens: request.maxOutputTokens,
-        messages: toChatMessages(request),
-        model: request.modelId,
-        stream: true,
-        stream_options: { include_usage: true },
-        tools: request.tools.map((tool) => ({
-          function: {
-            description: tool.description,
-            name: tool.name,
-            parameters: tool.inputSchema,
-            strict: true,
-          },
-          type: 'function',
-        })),
-      },
-      { signal: options.signal },
-    )
+    const stream = await this.#client.chat.completions
+      .create(
+        {
+          max_completion_tokens: request.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+          messages: toChatMessages(request),
+          model: request.modelId,
+          stream: true,
+          stream_options: { include_usage: true },
+          tools: request.tools.map((tool) => ({
+            function: {
+              description: tool.description,
+              name: tool.name,
+              parameters: tool.inputSchema,
+              strict: true,
+            },
+            type: 'function',
+          })),
+        },
+        { signal: options.signal },
+      )
+      .catch(rethrowWithOutputTokenHint)
 
     let started = false
     let textStarted = false

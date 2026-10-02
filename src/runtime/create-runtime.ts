@@ -31,6 +31,7 @@ import { MemoryNotificationBroker } from '../memory/memory-notification-broker.j
 import { UserInteractionBroker } from '../interaction/user-interaction-broker.js'
 import { createModelAdapter, getApiKeyEnvironmentName } from '../model/create-model-adapter.js'
 import type { ModelAdapter } from '../model/types.js'
+import { DEFAULT_MAX_OUTPUT_TOKENS } from '../model/output-tokens.js'
 import { createCanUseTool } from '../permissions/can-use-tool.js'
 import {
   filterDeniedTools,
@@ -479,7 +480,7 @@ export async function createDockRuntime(options: CreateDockRuntimeOptions): Prom
       currentAgentTool = tools.find((t) => t.name === 'Agent')
       const contextManager = new ContextManager({
         contextWindow: provider.contextWindow ?? 200_000,
-        maxOutputTokens: provider.maxOutputTokens ?? 8_192,
+        maxOutputTokens: provider.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
         toolResultClearing: loadedSettings.settings.contextManagement?.toolResultClearing,
         summarize: (input) => compactConversation({ ...input, model, transcriptPath: writer.path }),
         prepareRestoration: async (messages, signal) => {
@@ -555,7 +556,7 @@ export async function createDockRuntime(options: CreateDockRuntimeOptions): Prom
         fileHistory,
         initialMessages: existing?.messages ?? [],
         initialDisplayMessages: existing?.displayMessages ?? [],
-        ...(provider.maxOutputTokens ? { maxOutputTokens: provider.maxOutputTokens } : {}),
+        maxOutputTokens: provider.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
         model,
         modelId,
         permissionModeState,
