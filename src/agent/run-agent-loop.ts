@@ -2,6 +2,7 @@ import type { UUID } from 'node:crypto'
 import type { AgentSnapshot } from '../agents/types.js'
 import { buildPostCompactMessages } from '../context/compaction.js'
 import type { ContextManager, PreparedCompaction } from '../context/context-manager.js'
+import type { EvalCompaction } from '../context/eval-compaction.js'
 import {
   type AssistantTranscriptMessage,
   createAssistantMessage,
@@ -32,6 +33,7 @@ export type AgentLoopOptions = {
   ) => Promise<readonly UserTranscriptMessage[]>
   canUseTool?: CanUseTool
   contextManager?: ContextManager
+  evalCompaction?: EvalCompaction
   model: ModelAdapter
   modelId: string
   systemPrompt: readonly string[]
@@ -82,12 +84,18 @@ export async function* runAgentLoop(
   const messages: TranscriptMessage[] = [...options.messages]
   let toolTurns = 0
   let userContext = options.userContext
+  const evalCompaction =
+    options.evalCompaction && !options.getAgentIdentity?.().agentId
+      ? options.evalCompaction
+      : undefined
+  for (const message of messages) evalCompaction?.observeMessage(message)
 
   try {
     while (!controller.signal.aborted) {
       for (const message of (await options.getPendingMessages?.(messages)) ?? []) {
         if (messages.some((existing) => existing.uuid === message.uuid)) continue
         messages.push(message)
+        evalCompaction?.observeMessage(message)
         yield { type: 'user_message', message }
       }
       const toolDefinitions = options.tools.map(({ description, inputSchema, name }) => ({
@@ -112,7 +120,8 @@ export async function* runAgentLoop(
           }
           messages.splice(0, messages.length, ...cleared.messages)
         }
-        if (options.contextManager.shouldAutoCompact(messages, context)) {
+        const forced = await evalCompaction?.claim()
+        if (forced || options.contextManager.shouldAutoCompact(messages, context)) {
           yield { type: 'compaction_status', status: 'started' }
           let prepared: PreparedCompaction | undefined
           try {
@@ -131,6 +140,7 @@ export async function* runAgentLoop(
             if (controller.signal.aborted) return { messages, reason: 'aborted' }
           }
           if (prepared) {
+            if (forced && evalCompaction) prepared.evalCompactAfter = evalCompaction.after
             const compacted = buildPostCompactMessages(prepared)
             // The consumer durably commits the boundary before resuming this generator.
             yield { type: 'compact', messages: compacted, compaction: prepared }
@@ -192,6 +202,7 @@ export async function* runAgentLoop(
           })),
         })
         messages.push(limitMessage)
+        for (const _ of toolUses) evalCompaction?.observeResult(false)
         yield { type: 'user_message', message: limitMessage }
         return { messages, reason: 'max_turns' }
       }
@@ -254,6 +265,7 @@ export async function* runAgentLoop(
 
         for (const { context, result, outcome } of batchResults) {
           toolResults.push(result)
+          evalCompaction?.observeResult(Boolean(context) && outcome === 'success')
           if (context) additionalContexts.push(context)
           yield { type: 'tool_result', result, outcome }
         }
@@ -390,7 +402,14 @@ async function executeToolUse(
   }
 
   return {
-    ...(result.context ? { context: result.context } : {}),
+    ...(result.context
+      ? {
+          context: {
+            ...result.context,
+            skillContext: { ...result.context.skillContext, activationToolUseId: toolUse.id },
+          },
+        }
+      : {}),
     outcome: signal.aborted ? 'aborted' : result.isError ? 'error' : 'success',
     result: {
       content: result.content,

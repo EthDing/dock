@@ -22,6 +22,7 @@ import { ensureWorkspaceTrust, isWorkspaceTrusted } from '../config/workspace-tr
 import { addLocalPermissionRule, updateLocalSandboxMode } from '../config/write-settings.js'
 import { compactConversation } from '../context/compaction.js'
 import { ContextManager } from '../context/context-manager.js'
+import { EvalCompaction, parseEvalCompactAfter } from '../context/eval-compaction.js'
 import { loadInstructionDocuments } from '../context/load-instructions.js'
 import { prepareFileRestoration } from '../context/restore-context.js'
 import { ExtractMemories } from '../memory/extract-memories.js'
@@ -55,7 +56,7 @@ import { createEditTool, createReadTool, createWriteTool } from '../tools/file-t
 import { createGlobTool, createGrepTool } from '../tools/search-tools.js'
 import { createSkillTool, SkillActivator } from '../skills/activation.js'
 import { discoverSkills, isSkillResourcePath } from '../skills/registry.js'
-import { prepareSkillRestoration } from '../skills/context.js'
+import { parseSkillRestoreMode, prepareSkillRestorationWithMetadata } from '../skills/context.js'
 import type { AgentTool, CanUseTool } from '../tools/types.js'
 import { createInteractionTools } from '../tools/interaction-tools.js'
 import { createTaskTools } from '../tools/task-tools.js'
@@ -101,6 +102,8 @@ export async function createDockRuntime(options: CreateDockRuntimeOptions): Prom
   const cwd = options.cwd ?? process.cwd()
   const homeDir = options.homeDir ?? homedir()
   const environment = options.environment ?? process.env
+  const skillRestoreMode = parseSkillRestoreMode(environment.DOCK_EVAL_SKILL_RESTORE)
+  const evalCompactAfter = parseEvalCompactAfter(environment.DOCK_EVAL_COMPACT_AFTER)
   const configDir = join(homeDir, '.dock')
   const cli = options.cli ?? parseCliOptions(options.args)
   const projectRoot = await findProjectRoot(cwd)
@@ -329,6 +332,7 @@ export async function createDockRuntime(options: CreateDockRuntimeOptions): Prom
       baseRef: loadedSettings.settings.worktree?.baseRef,
       createRuntime: (metadata, parent, initialMessages) =>
         createSubagentRuntime({
+          skillRestoreMode,
           metadata,
           ...(parent ? { parent } : {}),
           ...(initialMessages ? { initialMessages } : {}),
@@ -499,9 +503,11 @@ export async function createDockRuntime(options: CreateDockRuntimeOptions): Prom
               return decision.behavior === 'allow'
             },
           })
+          const skills = prepareSkillRestorationWithMetadata(messages, skillRestoreMode)
           return {
             ...restored,
-            attachments: [...restored.attachments, ...prepareSkillRestoration(messages)],
+            skillRestoration: skills.skillRestoration,
+            attachments: [...restored.attachments, ...skills.attachments],
             userContext: nextUserContext,
           }
         },
@@ -539,6 +545,13 @@ export async function createDockRuntime(options: CreateDockRuntimeOptions): Prom
         },
         canUseTool,
         contextManager,
+        ...(evalCompactAfter !== undefined
+          ? {
+              evalCompaction: new EvalCompaction(evalCompactAfter, existing?.records ?? [], () =>
+                writer.recordEvalCompactionTrigger(evalCompactAfter),
+              ),
+            }
+          : {}),
         fileHistory,
         initialMessages: existing?.messages ?? [],
         initialDisplayMessages: existing?.displayMessages ?? [],

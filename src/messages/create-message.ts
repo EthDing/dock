@@ -12,7 +12,13 @@ export type UserTranscriptMessage = {
   message: UserMessage
 }
 
-export type SkillContext = { contentHash: string; location: string; name: string }
+export type SkillContext = {
+  contentHash: string
+  location: string
+  name: string
+  isPartial?: boolean
+  activationToolUseId?: string
+}
 
 export type AssistantTranscriptMessage = {
   requestTokenEstimate?: number

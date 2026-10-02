@@ -1,8 +1,61 @@
 import { describe, expect, it } from 'vitest'
 import { createUserMessage } from '../../src/messages/create-message.js'
-import { prepareSkillRestoration } from '../../src/skills/context.js'
+import {
+  parseSkillRestoreMode,
+  prepareSkillRestoration,
+  prepareSkillRestorationWithMetadata,
+} from '../../src/skills/context.js'
 
 describe('prepareSkillRestoration', () => {
+  it('defaults to head5k and rejects unknown restore modes', () => {
+    expect(parseSkillRestoreMode(undefined)).toBe('head5k')
+    expect(() => parseSkillRestoreMode('invalid')).toThrow('DOCK_EVAL_SKILL_RESTORE')
+  })
+
+  it.each(['none', 'full', 'head5k', 'pointer'] as const)(
+    'restores %s and records actual injected tokens',
+    (mode) => {
+      expect(parseSkillRestoreMode(mode)).toBe(mode)
+      const body = `instructions\n${'x'.repeat(25_000)}\nTAIL`
+      const { attachments, skillRestoration } = prepareSkillRestorationWithMetadata(
+        [skill('review', body)],
+        mode,
+      )
+      const text = attachments
+        .flatMap((message) =>
+          message.message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])),
+        )
+        .join('\n')
+      expect(skillRestoration).toEqual({
+        mode,
+        skills: [
+          { name: 'review', location: '/review/SKILL.md', tokens: Math.ceil(text.length / 4) },
+        ],
+      })
+      if (mode === 'none') expect(attachments).toEqual([])
+      if (mode === 'full') expect(text).toBe(body)
+      if (mode === 'head5k') expect(text).toContain('truncated')
+      if (mode === 'pointer') {
+        expect(text).toContain('Skill: review')
+        expect(text).toContain('/review/SKILL.md')
+        expect(text).toContain('Skill tool or Read')
+        expect(text).not.toContain('instructions')
+        expect(attachments[0]?.skillContext?.isPartial).toBe(true)
+      }
+    },
+  )
+
+  it('keeps the full mode combined budget and reports zero tokens for omitted Skills', () => {
+    const { attachments, skillRestoration } = prepareSkillRestorationWithMetadata(
+      [skill('older', 'x'.repeat(60_000)), skill('newer', 'y'.repeat(60_000))],
+      'full',
+    )
+    expect(attachments.filter((message) => message.skillContext)).toHaveLength(1)
+    expect(skillRestoration.skills.map(({ name, tokens }) => ({ name, tokens }))).toEqual([
+      { name: 'newer', tokens: 15_000 },
+      { name: 'older', tokens: 0 },
+    ])
+  })
   function skill(name: string, text: string) {
     return createUserMessage(
       { content: [{ type: 'text', text }] },
@@ -26,7 +79,7 @@ describe('prepareSkillRestoration', () => {
     expect(block.text).not.toContain('END')
     expect(block.text.split('\n').at(-1)).toMatch(/truncated.*\/review\/SKILL.md/)
     expect(Math.ceil(block.text.length / 4)).toBe(5000)
-    expect(restored[0]?.skillContext).toEqual(original.skillContext)
+    expect(restored[0]?.skillContext).toEqual({ ...original.skillContext, isPartial: true })
     expect(JSON.stringify(original)).toContain('END')
     expect(prepareSkillRestoration(restored)[0]?.message.content).toEqual(
       restored[0]?.message.content,

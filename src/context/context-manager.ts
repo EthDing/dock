@@ -10,6 +10,7 @@ import { clearOldToolResults, type ToolResultClearingSettings } from './tool-res
 
 export type ContextAnalysis = { estimatedTokens: number; threshold: number; shouldCompact: boolean }
 export type CompactionRestoration = {
+  skillRestoration?: CompactionResult['skillRestoration']
   attachments: readonly UserTranscriptMessage[]
   userContext?: Readonly<Record<string, string>>
   commit: () => void
@@ -86,6 +87,9 @@ export class ContextManager {
         ...result,
         trigger,
         attachments: restoration?.attachments ?? result.attachments,
+        ...(restoration?.skillRestoration
+          ? { skillRestoration: restoration.skillRestoration }
+          : {}),
       }
       const output = buildPostCompactMessages(prepared)
       const restoredRequest =

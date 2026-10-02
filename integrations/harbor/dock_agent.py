@@ -8,9 +8,11 @@ and converts Dock's persisted session JSONL into ATIF after the run.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +62,9 @@ class DockAgent(BaseInstalledAgent):
         permission_mode: str = "bypassPermissions",
         context_window: int | None = None,
         max_output_tokens: int | None = None,
+        eval_skill_restore: str | None = None,
+        eval_compact_after: int | None = None,
+        activate_skill: str | None = None,
         node_version: str = "24",
         pnpm_version: str = "10.34.5",
         **kwargs: Any,
@@ -79,6 +84,24 @@ class DockAgent(BaseInstalledAgent):
         self._permission_mode = permission_mode
         self._context_window = context_window
         self._max_output_tokens = max_output_tokens
+        if eval_skill_restore not in {None, "none", "full", "head5k", "pointer"}:
+            raise ValueError("eval_skill_restore must be none, full, head5k, or pointer")
+        if eval_compact_after is not None and (
+            isinstance(eval_compact_after, bool)
+            or not isinstance(eval_compact_after, int)
+            or not 0 < eval_compact_after <= 2**53 - 1
+        ):
+            raise ValueError("eval_compact_after must be a positive safe integer")
+        if activate_skill is not None and (
+            not isinstance(activate_skill, str)
+            or not activate_skill.strip()
+            or "\n" in activate_skill
+            or "\r" in activate_skill
+        ):
+            raise ValueError("activate_skill must be a nonempty single-line Skill name")
+        self._eval_skill_restore = eval_skill_restore
+        self._eval_compact_after = eval_compact_after
+        self._activate_skill = activate_skill
         self._node_version = node_version
         self._pnpm_version = pnpm_version
 
@@ -96,6 +119,12 @@ class DockAgent(BaseInstalledAgent):
     @staticmethod
     def name() -> str:
         return "dock"
+
+    @property
+    def extra_env(self) -> dict[str, str]:
+        # Trial otherwise injects these through Docker exec arguments. Preserve
+        # them in the private payload instead, including custom provider keys.
+        return {}
 
     def get_version_command(self) -> str | None:
         return "dock --version"
@@ -180,16 +209,24 @@ dock --version
     ) -> None:
         del context  # Populated from the persisted session after the run.
         settings, dock_model, run_env = self._runtime_settings()
-        settings_json = json.dumps(settings, separators=(",", ":"))
-        setup_script = """
+        if self._activate_skill is not None:
+            instruction = f"Before starting, activate skill {self._activate_skill}.\n\n{instruction}"
+        # Harbor's Docker backend may serialize exec env into process arguments.
+        # Upload credentials privately and load them only inside the container.
+        remote_payload = f"/tmp/dock-harbor-run-{uuid.uuid4().hex}.json"
+        runner = """
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const payloadPath = process.argv[1];
+const payload = JSON.parse(fs.readFileSync(payloadPath, 'utf8'));
+fs.unlinkSync(payloadPath);
 const home = process.env.HOME;
 const configDir = path.join(home, '.dock');
 fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
 fs.writeFileSync(
   path.join(configDir, 'settings.json'),
-  JSON.stringify(JSON.parse(process.env.DOCK_HARBOR_SETTINGS), null, 2) + '\\n',
+  JSON.stringify(payload.settings, null, 2) + '\\n',
   { mode: 0o600 },
 );
 fs.writeFileSync(
@@ -197,16 +234,16 @@ fs.writeFileSync(
   JSON.stringify({ workspaces: [process.cwd()] }, null, 2) + '\\n',
   { mode: 0o600 },
 );
+const result = spawnSync('dock', payload.flags, {
+  env: { ...process.env, ...payload.env },
+  input: payload.instruction,
+  stdio: ['pipe', 'inherit', 'inherit'],
+});
+process.exit(result.status ?? 1);
 """
-        await self.exec_as_agent(
-            environment,
-            command=f"node -e {shlex.quote(setup_script)}",
-            env={**run_env, "DOCK_HARBOR_SETTINGS": settings_json},
-        )
 
         log_dir = self.environment_logs_dir.as_posix()
         flags = [
-            "dock",
             "--print",
             "--model",
             dock_model,
@@ -221,18 +258,32 @@ fs.writeFileSync(
             flags.append("--no-memory")
         command = (
             f"mkdir -p {shlex.quote(log_dir)} && "
-            'printf "%s" "$DOCK_HARBOR_INSTRUCTION" | '
-            f"{shlex.join(flags)} "
+            f"node -e {shlex.quote(runner)} {shlex.quote(remote_payload)} "
             f"2> >(tee {shlex.quote(log_dir + '/dock-stderr.txt')} >&2) "
             f"| tee {shlex.quote(log_dir + '/dock-stream.jsonl')}"
         )
         try:
+            with tempfile.TemporaryDirectory(prefix="dock-harbor-run-") as temp_dir:
+                payload_path = Path(temp_dir) / "run.json"
+                descriptor = os.open(payload_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, "w", encoding="utf-8") as payload:
+                    json.dump(
+                        {"settings": settings, "env": run_env,
+                         "instruction": instruction, "flags": flags},
+                        payload,
+                    )
+                await environment.upload_file(payload_path, remote_payload)
+            owner = environment.default_user
+            permissions = f"chmod 600 {shlex.quote(remote_payload)}"
+            if owner is not None:
+                permissions += f" && chown {shlex.quote(str(owner))} {shlex.quote(remote_payload)}"
+            await self.exec_as_root(environment, command=permissions)
             await self.exec_as_agent(
                 environment,
                 command=command,
-                env={**run_env, "DOCK_HARBOR_INSTRUCTION": instruction},
             )
         finally:
+            await self.exec_as_root(environment, command=f"rm -f {shlex.quote(remote_payload)}")
             await self.exec_as_agent(
                 environment,
                 command=(
@@ -241,7 +292,6 @@ fs.writeFileSync(
                     f"cp -R \"$HOME/.dock/projects\" {shlex.quote(log_dir + '/sessions')}; "
                     "fi"
                 ),
-                env=run_env,
             )
 
     def populate_context_post_run(self, context: AgentContext) -> None:
@@ -303,7 +353,12 @@ fs.writeFileSync(
             "autoMemoryEnabled": not self._no_memory,
             "subagents": {"backgroundEnabled": False},
         }
-        return settings, dock_model, dict(connection.env)
+        run_env = {**self._extra_env, **connection.env}
+        if self._eval_skill_restore is not None:
+            run_env["DOCK_EVAL_SKILL_RESTORE"] = self._eval_skill_restore
+        if self._eval_compact_after is not None:
+            run_env["DOCK_EVAL_COMPACT_AFTER"] = str(self._eval_compact_after)
+        return settings, dock_model, run_env
 
 
 def find_root_session(root: Path) -> Path | None:

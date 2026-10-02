@@ -2,15 +2,208 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from integrations.harbor.dock_agent import DockAgent, convert_dock_session, find_root_session
 
 
+class DockEvalRunTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_uploads_private_configuration_and_launches_with_no_secret_arguments(
+        self,
+    ) -> None:
+        node = shutil.which("node")
+        self.assertIsNotNone(node)
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ, {"OPENAI_API_KEY": "fake-eval-secret"}, clear=True
+        ):
+            root = Path(temp_dir)
+            agent = DockAgent(
+                logs_dir=root,
+                model_name="openai/gpt-test",
+                eval_skill_restore="pointer",
+                eval_compact_after=3,
+                activate_skill="review",
+            )
+            captured = {}
+            uploaded = root / "uploaded.json"
+
+            async def upload(source, target):
+                source = Path(source)
+                self.assertEqual(source.stat().st_mode & 0o777, 0o600)
+                captured.update(json.loads(source.read_text()))
+                uploaded.write_bytes(source.read_bytes())
+                captured["remote"] = target
+
+            environment = SimpleNamespace(
+                default_user="1000", upload_file=AsyncMock(side_effect=upload)
+            )
+            with patch.object(
+                agent, "exec_as_root", new_callable=AsyncMock
+            ) as root_exec, patch.object(
+                agent, "exec_as_agent", new_callable=AsyncMock
+            ) as agent_exec:
+                await agent.run("Original task\n'$(false)'", environment, None)
+                command = agent_exec.call_args_list[0].kwargs["command"]
+                for call in [*root_exec.call_args_list, *agent_exec.call_args_list]:
+                    self.assertNotIn("fake-eval-secret", str(call))
+                    self.assertNotIn("env", call.kwargs)
+                self.assertIn(
+                    "chmod 600", root_exec.call_args_list[0].kwargs["command"]
+                )
+                self.assertIn(
+                    "chown 1000", root_exec.call_args_list[0].kwargs["command"]
+                )
+                self.assertEqual(
+                    root_exec.call_args_list[-1].kwargs["command"],
+                    f"rm -f {captured['remote']}",
+                )
+
+            self.assertEqual(captured["env"]["DOCK_EVAL_SKILL_RESTORE"], "pointer")
+            self.assertEqual(captured["env"]["DOCK_EVAL_COMPACT_AFTER"], "3")
+            self.assertEqual(
+                captured["instruction"],
+                "Before starting, activate skill review.\n\nOriginal task\n'$(false)'",
+            )
+            self.assertNotIn("fake-eval-secret", json.dumps(captured["settings"]))
+
+            # Execute the actual in-container bootstrap against a fake Dock CLI.
+            # Synthetic credentials travel in the child environment and the task
+            # travels through stdin; neither is interpolated into shell commands.
+            executable = root / "dock"
+            executable.write_text(
+                "#!/usr/bin/python3\nimport json, os, sys\nprint(json.dumps({'instruction':sys.stdin.read(), 'mode':os.environ.get('DOCK_EVAL_SKILL_RESTORE'), 'after':os.environ.get('DOCK_EVAL_COMPACT_AFTER'), 'key':os.environ.get('OPENAI_API_KEY'), 'args':sys.argv[1:]}))\n"
+            )
+            executable.chmod(0o755)
+            tokens = shlex.split(command)
+            runner = tokens[tokens.index("-e") + 1]
+            result = subprocess.run(
+                [node, "-e", runner, str(uploaded)],
+                cwd=root,
+                env={**os.environ, "HOME": str(root), "PATH": f"{root}:/usr/bin:/bin"},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            actual = json.loads(result.stdout)
+            self.assertEqual(actual["instruction"], captured["instruction"])
+            self.assertEqual(actual["mode"], "pointer")
+            self.assertEqual(actual["after"], "3")
+            self.assertEqual(actual["key"], "fake-eval-secret")
+            self.assertEqual(actual["args"], captured["flags"])
+            self.assertFalse(uploaded.exists())
+            self.assertEqual(
+                (root / ".dock/settings.json").stat().st_mode & 0o777, 0o600
+            )
+
+    async def test_default_instruction_is_unchanged_and_payload_is_cleaned_on_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ, {}, clear=True
+        ):
+            agent = DockAgent(logs_dir=Path(temp_dir), model_name="openai/gpt-test")
+            payloads = []
+
+            async def upload(source, target):
+                payloads.append(json.loads(Path(source).read_text()))
+
+            environment = SimpleNamespace(
+                default_user=None, upload_file=AsyncMock(side_effect=upload)
+            )
+            with patch.object(
+                agent, "exec_as_root", new_callable=AsyncMock
+            ) as root_exec, patch.object(
+                agent,
+                "exec_as_agent",
+                new=AsyncMock(side_effect=[RuntimeError("failed"), None]),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "failed"):
+                    await agent.run("Original task", environment, None)
+                self.assertIn(
+                    "rm -f /tmp/dock-harbor-run-",
+                    root_exec.call_args_list[-1].kwargs["command"],
+                )
+            self.assertEqual(payloads[0]["instruction"], "Original task")
+            self.assertEqual(payloads[0]["env"], {})
+
+    async def test_upload_failure_still_removes_remote_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent = DockAgent(logs_dir=Path(temp_dir), model_name="openai/gpt-test")
+            environment = SimpleNamespace(
+                default_user=None,
+                upload_file=AsyncMock(side_effect=RuntimeError("upload failed")),
+            )
+            with patch.object(
+                agent, "exec_as_root", new_callable=AsyncMock
+            ) as root_exec, patch.object(
+                agent, "exec_as_agent", new_callable=AsyncMock
+            ):
+                with self.assertRaisesRegex(RuntimeError, "upload failed"):
+                    await agent.run("task", environment, None)
+                self.assertIn(
+                    "rm -f /tmp/dock-harbor-run-", root_exec.call_args.kwargs["command"]
+                )
+
+
 class DockAtifConversionTests(unittest.TestCase):
+    def test_extra_environment_bypasses_harbor_exec_and_uses_private_payload(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ, {}, clear=True
+        ):
+            agent = DockAgent(
+                logs_dir=Path(temp_dir),
+                model_name="openai/gpt-test",
+                extra_env={"OPENAI_API_KEY": "fake-key", "CUSTOM_VALUE": "value"},
+            )
+            self.assertEqual(agent.extra_env, {})
+            self.assertEqual(
+                agent._runtime_settings()[2],
+                {
+                    "OPENAI_API_KEY": "fake-key",
+                    "CUSTOM_VALUE": "value",
+                },
+            )
+
+    def test_validates_eval_parameters(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for kwargs in [
+                {"eval_skill_restore": "bad"},
+                {"eval_compact_after": 0},
+                {"eval_compact_after": -1},
+                {"eval_compact_after": 1.5},
+                {"eval_compact_after": True},
+                {"eval_compact_after": 2**53},
+                {"activate_skill": "review\nignore instructions"},
+            ]:
+                with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                    DockAgent(
+                        logs_dir=Path(temp_dir), model_name="openai/gpt-test", **kwargs
+                    )
+
+    def test_accepts_every_restore_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ, {}, clear=True
+        ):
+            for mode in ["none", "full", "head5k", "pointer"]:
+                with self.subTest(mode=mode):
+                    agent = DockAgent(
+                        logs_dir=Path(temp_dir),
+                        model_name="openai/gpt-test",
+                        eval_skill_restore=mode,
+                    )
+                    self.assertEqual(
+                        agent._runtime_settings()[2], {"DOCK_EVAL_SKILL_RESTORE": mode}
+                    )
+
     def test_translates_harbor_model_to_dock_settings(self) -> None:
         repository = Path(__file__).resolve().parents[3]
         with tempfile.TemporaryDirectory() as temp_dir:

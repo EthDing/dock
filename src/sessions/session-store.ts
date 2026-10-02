@@ -62,7 +62,10 @@ export type SessionToolResultClearRecord = {
 
 export type SessionCompactRecord = {
   compactionId?: UUID
-  metadata?: Pick<CompactionResult, 'usage' | 'trigger' | 'preTokens' | 'postTokens'>
+  metadata?: Pick<
+    CompactionResult,
+    'usage' | 'trigger' | 'preTokens' | 'postTokens' | 'skillRestoration' | 'evalCompactAfter'
+  >
   type: 'compact_boundary'
   preservedUuids: UUID[]
   summaryUuid: UUID
@@ -77,6 +80,7 @@ export type SessionRecord =
   | FileHistorySnapshotRecord
   | SessionCompactRecord
   | SessionToolResultClearRecord
+  | { type: 'eval_compaction_trigger'; after: number; timestamp: string }
 
 export type LoadedSession = {
   displayMessages: readonly TranscriptMessage[]
@@ -331,6 +335,10 @@ export class SessionWriter {
               trigger: metadata.trigger,
               ...(metadata.preTokens !== undefined ? { preTokens: metadata.preTokens } : {}),
               ...(metadata.postTokens !== undefined ? { postTokens: metadata.postTokens } : {}),
+              ...(metadata.skillRestoration ? { skillRestoration: metadata.skillRestoration } : {}),
+              ...(metadata.evalCompactAfter !== undefined
+                ? { evalCompactAfter: metadata.evalCompactAfter }
+                : {}),
             },
           }
         : {}),
@@ -344,6 +352,15 @@ export class SessionWriter {
     this.#closed = true
     await this.#file.close()
     await releaseLock(this.#lock, this.#lockPath)
+  }
+
+  async recordEvalCompactionTrigger(after: number): Promise<void> {
+    this.#assertOpen()
+    await appendAndSync(this.#file, {
+      type: 'eval_compaction_trigger',
+      after,
+      timestamp: this.#now().toISOString(),
+    })
   }
 
   #assertOpen(): void {
@@ -581,6 +598,15 @@ function parseSessionRecord(value: unknown, path: string, line: number): Session
     )
       throw new Error(`Invalid tool_result_clear record at ${path}:${line}`)
     return value as SessionToolResultClearRecord
+  }
+  if (value.type === 'eval_compaction_trigger') {
+    if (
+      !Number.isSafeInteger(value.after) ||
+      Number(value.after) <= 0 ||
+      typeof value.timestamp !== 'string'
+    )
+      throw new Error(`Invalid eval_compaction_trigger record at ${path}:${line}`)
+    return value as Extract<SessionRecord, { type: 'eval_compaction_trigger' }>
   }
   if (value.type === 'compact_boundary') {
     if (
