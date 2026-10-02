@@ -52,7 +52,7 @@ describe('file tools', () => {
     }
   })
 
-  it('requires a full Read before editing an existing file', async () => {
+  it('requires a successful Read before editing an existing file', async () => {
     const { cwd, edit } = await setup()
     const filePath = join(cwd, 'file.txt')
     await writeFile(filePath, 'before')
@@ -62,7 +62,79 @@ describe('file tools', () => {
         { file_path: filePath, old_string: 'before', new_string: 'after' },
         executionOptions,
       ),
-    ).rejects.toThrow('File has not been read yet')
+    ).rejects.toThrow('without a successful Read first')
+  })
+
+  it('checks the 256KB byte boundary even with an offset, but bypasses it with a limit', async () => {
+    const { cwd, read } = await setup()
+    const filePath = join(cwd, 'large.txt')
+    const content = `${'界'.repeat(87_381)}\n`
+    expect(Buffer.byteLength(content)).toBe(256 * 1024)
+    await writeFile(filePath, content)
+    expect((await read.execute({ file_path: filePath, offset: 2 }, executionOptions)).content).toBe(
+      '2→',
+    )
+    await writeFile(filePath, `${content}x`)
+    for (const range of [{}, { offset: 2 }]) {
+      await expect(
+        read.execute({ file_path: filePath, ...range }, executionOptions),
+      ).rejects.toThrow(/256KB.*offset.*limit.*Grep/)
+    }
+    expect(
+      (await read.execute({ file_path: filePath, offset: 2, limit: 1 }, executionOptions)).content,
+    ).toBe('2→x')
+  })
+
+  it.each([undefined, 1])(
+    'enforces output tokens including line numbers with limit %s',
+    async (limit) => {
+      const { cwd, read, write } = await setup()
+      const filePath = join(cwd, 'tokens.txt')
+      const input = { file_path: filePath, ...(limit === undefined ? {} : { limit }) }
+      await writeFile(filePath, 'x'.repeat(99_999))
+      await expect(read.execute(input, executionOptions)).rejects.toThrow(/25,000.*offset.*limit/)
+      await expect(
+        write.execute({ file_path: filePath, content: 'replacement' }, executionOptions),
+      ).rejects.toThrow('without a successful Read first')
+      await writeFile(filePath, 'x'.repeat(99_998))
+      expect((await read.execute(input, executionOptions)).content).toHaveLength(100_000)
+    },
+  )
+
+  it.each([{ offset: 2 }, { limit: 1 }, { offset: 2, limit: 1 }])(
+    'allows Edit and Write after a partial Read %j',
+    async (range) => {
+      const { cwd, read, edit, write } = await setup()
+      const filePath = join(cwd, 'partial.txt')
+      await writeFile(filePath, 'first\nsecond\nthird')
+      await read.execute({ file_path: filePath, ...range }, executionOptions)
+      await edit.execute(
+        { file_path: filePath, old_string: 'third', new_string: 'updated' },
+        executionOptions,
+      )
+      expect(await readFile(filePath, 'utf8')).toBe('first\nsecond\nupdated')
+      await read.execute({ file_path: filePath, ...range }, executionOptions)
+      await write.execute({ file_path: filePath, content: 'replacement' }, executionOptions)
+      expect(await readFile(filePath, 'utf8')).toBe('replacement')
+    },
+  )
+
+  it('detects external changes outside the partially read lines for both Edit and Write', async () => {
+    const { cwd, read, edit, write } = await setup()
+    const filePath = join(cwd, 'partial.txt')
+    await writeFile(filePath, 'visible\nhidden')
+    await read.execute({ file_path: filePath, limit: 1 }, executionOptions)
+    await writeFile(filePath, 'visible\nexternal change')
+    await expect(
+      edit.execute(
+        { file_path: filePath, old_string: 'visible', new_string: 'updated' },
+        executionOptions,
+      ),
+    ).rejects.toThrow('modified since read')
+    await expect(
+      write.execute({ file_path: filePath, content: 'replacement' }, executionOptions),
+    ).rejects.toThrow('modified since read')
+    expect(await readFile(filePath, 'utf8')).toBe('visible\nexternal change')
   })
 
   it('edits a fully read file and checkpoint rewind restores it', async () => {
