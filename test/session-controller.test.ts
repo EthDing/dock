@@ -7,8 +7,58 @@ import { FakeModelAdapter } from '../src/model/fake-model.js'
 import { createSessionId } from '../src/sessions/ids.js'
 import { loadSession, SessionWriter } from '../src/sessions/session-store.js'
 import { FileHistory } from '../src/checkpoint/file-history.js'
+import type { AgentTool } from '../src/tools/types.js'
 
 describe('SessionController', () => {
+  it('passes a headless max-turn limit through without executing the next tool round', async () => {
+    const configDir = await mkdtemp(join(tmpdir(), 'dock-controller-max-turns-'))
+    const cwd = '/work/project'
+    const sessionId = createSessionId()
+    const writer = await SessionWriter.create({ configDir, cwd, sessionId })
+    const fileHistory = new FileHistory({ configDir, cwd, sessionId })
+    const execute = vi.fn(async () => ({ content: 'ok' }))
+    const tool: AgentTool = {
+      name: 'Test',
+      description: 'test',
+      inputSchema: { type: 'object' },
+      isConcurrencySafe: () => false,
+      execute,
+    }
+    const toolResponse = (id: string) => [
+      { type: 'message_start' as const, messageId: id },
+      {
+        type: 'content_block_start' as const,
+        index: 0,
+        block: { type: 'tool_use' as const, id: `${id}-tool`, name: 'Test' },
+      },
+      {
+        type: 'content_block_delta' as const,
+        index: 0,
+        delta: { type: 'input_json_delta' as const, partialJson: '{}' },
+      },
+      { type: 'content_block_stop' as const, index: 0 },
+      { type: 'message_delta' as const, stopReason: 'tool_use' as const, usage: {} },
+      { type: 'message_stop' as const },
+    ]
+    const model = new FakeModelAdapter([toolResponse('first'), toolResponse('second')])
+    const controller = new SessionController({
+      fileHistory,
+      model,
+      modelId: 'test-model',
+      systemPrompt: [],
+      tools: [tool],
+      writer,
+    })
+
+    const iterator = controller.submit('run', { maxTurns: 1 })
+    let next = await iterator.next()
+    while (!next.done) next = await iterator.next()
+
+    expect(next.value.reason).toBe('max_turns')
+    expect(execute).toHaveBeenCalledOnce()
+    await controller.close()
+  })
+
   it('persists a complete user and assistant turn', async () => {
     const configDir = await mkdtemp(join(tmpdir(), 'dock-controller-'))
     const cwd = '/work/project'

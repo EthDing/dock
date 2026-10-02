@@ -48,7 +48,7 @@ export type DockUiController = {
   displayMessages?: readonly TranscriptMessage[]
   abort: (reason?: unknown) => void
   close: () => Promise<void>
-  submit: (text: string) => AsyncIterable<UiEvent>
+  submit: (text: string, options?: { maxTurns?: number }) => AsyncIterable<UiEvent>
   activateSkill?: (name: string, invocationInput?: string) => AsyncIterable<UiEvent>
   skills?: readonly SkillDefinition[]
   skillDiagnostics?: readonly SkillDiagnostic[]

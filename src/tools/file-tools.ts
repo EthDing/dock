@@ -48,10 +48,13 @@ export function createReadTool(dependencies: FileToolDependencies): AgentTool {
       throwIfAborted(signal)
       const parsed = readInputSchema.parse(input)
       const filePath = absolutePath(parsed.file_path)
-      const [rawContent, fileStats] = await Promise.all([
-        readFile(filePath, 'utf8'),
-        stat(filePath),
-      ])
+      const fileStats = await stat(filePath)
+      if (parsed.limit === undefined && fileStats.size > 256 * 1024) {
+        throw new Error(
+          'File exceeds the 256KB read limit. Use offset and limit to read it in portions, or use Grep to search for specific content.',
+        )
+      }
+      const rawContent = await readFile(filePath, 'utf8')
       const content = normalizeLineEndings(rawContent)
       const lines = content.split('\n')
       const offset = parsed.offset ?? 1
@@ -59,6 +62,12 @@ export function createReadTool(dependencies: FileToolDependencies): AgentTool {
       const end =
         parsed.limit === undefined ? lines.length : Math.min(lines.length, start + parsed.limit)
       const selected = lines.slice(start, end)
+      const output = selected.map((line, index) => `${offset + index}→${line}`).join('\n')
+      if (Math.ceil(output.length / 4) > 25_000) {
+        throw new Error(
+          'Read output exceeds the 25,000 token limit. Use offset and limit to read a smaller portion.',
+        )
+      }
       dependencies.readFileState.set(filePath, {
         content,
         isPartialView: start > 0 || end < lines.length,
@@ -67,7 +76,7 @@ export function createReadTool(dependencies: FileToolDependencies): AgentTool {
         timestamp: fileStats.mtimeMs,
       })
       return {
-        content: selected.map((line, index) => `${offset + index}→${line}`).join('\n'),
+        content: output,
       }
     },
     inputSchema: {
@@ -261,7 +270,7 @@ async function assertSafeToWriteExisting(filePath: string, state: FileReadState)
     throw error
   }
   const previous = state.get(filePath)
-  if (!previous || previous.isPartialView) throw new Error('File has not been read yet')
+  if (!previous) throw new Error('Cannot modify an existing file without a successful Read first')
   if (previous.content !== current) throw new Error('File has been modified since read')
 }
 

@@ -84,6 +84,7 @@ export async function compactConversation(
           options.model,
           {
             ...options.request,
+            maxOutputTokens: Math.min(options.request.maxOutputTokens ?? 8192, 20_000),
             messages: [...prefix, summaryRequest],
             cachePrefixMessageCount: prefix.length,
           },
@@ -102,6 +103,7 @@ export async function compactConversation(
           options.model,
           {
             ...options.request,
+            maxOutputTokens: Math.min(options.request.maxOutputTokens ?? 8192, 20_000),
             systemPrompt: ['You are a helpful AI assistant tasked with summarizing conversations.'],
             messages: [...history.map((message) => message.message), summaryRequest],
             tools: options.request.tools.filter((tool) => tool.name === 'Read'),

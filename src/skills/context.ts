@@ -5,6 +5,7 @@ import {
 } from '../messages/create-message.js'
 
 const COMBINED_SKILL_CHARS = 100_000
+const PER_SKILL_CHARS = 20_000
 
 export function prepareSkillRestoration(
   messages: readonly TranscriptMessage[],
@@ -21,10 +22,14 @@ export function prepareSkillRestoration(
   for (const [name, message] of newest) {
     const skillContext = message.skillContext
     if (!skillContext) continue
-    const text = message.message.content
+    let text = message.message.content
       .filter((block) => block.type === 'text')
       .map((block) => block.text)
       .join('\n')
+    if (text.length > PER_SKILL_CHARS) {
+      const notice = `\n[Skill content truncated after compaction. Use Read to read the full Skill at ${skillContext.location}.]`
+      text = text.slice(0, Math.max(0, PER_SKILL_CHARS - notice.length)) + notice
+    }
     if (used + text.length > COMBINED_SKILL_CHARS) {
       omitted.push(name)
       continue

@@ -183,6 +183,16 @@ export async function* runAgentLoop(
 
       toolTurns += 1
       if (options.maxTurns !== undefined && toolTurns > options.maxTurns) {
+        const limitMessage = createUserMessage({
+          content: toolUses.map((toolUse) => ({
+            type: 'tool_result' as const,
+            toolUseId: toolUse.id,
+            isError: true,
+            content: 'Tool was not executed because the maximum tool-use turns were reached',
+          })),
+        })
+        messages.push(limitMessage)
+        yield { type: 'user_message', message: limitMessage }
         return { messages, reason: 'max_turns' }
       }
 

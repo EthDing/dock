@@ -138,8 +138,11 @@ export class SessionController {
     return yield* this.#run()
   }
 
-  async *submit(text: string): AsyncGenerator<AgentEvent, AgentLoopResult> {
-    return yield* this.#run({ text, userInitiated: true })
+  async *submit(
+    text: string,
+    options: { maxTurns?: number } = {},
+  ): AsyncGenerator<AgentEvent, AgentLoopResult> {
+    return yield* this.#run({ text, userInitiated: true, ...options })
   }
 
   get skills(): readonly SkillDefinition[] {
@@ -173,6 +176,7 @@ export class SessionController {
   async *#run(
     options: {
       initialMessage?: UserTranscriptMessage
+      maxTurns?: number
       text?: string
       userInitiated?: boolean
     } = {},
@@ -201,6 +205,7 @@ export class SessionController {
             }
           : {}),
         messages: this.#messages,
+        ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
         ...(this.#maxOutputTokens ? { maxOutputTokens: this.#maxOutputTokens } : {}),
         model: this.#model,
         modelId: this.#modelId,

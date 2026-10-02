@@ -15,7 +15,7 @@ describe('dock CLI', () => {
     })
 
     expect(exitCode).toBe(0)
-    expect(output).toEqual(['0.1.0\n'])
+    expect(output).toEqual(['0.1.1\n'])
   })
 
   it('recognizes invocation through an installed bin symlink', async () => {
@@ -26,5 +26,15 @@ describe('dock CLI', () => {
     await symlink(modulePath, binPath)
 
     expect(isEntrypoint(pathToFileURL(modulePath).href, binPath)).toBe(true)
+  })
+
+  it('rejects headless-only flags without print mode', async () => {
+    const errors: string[] = []
+    const exitCode = await runCli(['--max-turns', '2'], {
+      stderr: (chunk) => errors.push(chunk),
+      stdout: () => {},
+    })
+    expect(exitCode).toBe(1)
+    expect(errors.join('')).toContain('--max-turns is only available with --print')
   })
 })

@@ -2,16 +2,19 @@
 
 import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { parseCliOptions } from './cli-options.js'
 import { DOCK_VERSION } from './version.js'
 export { DOCK_VERSION } from './version.js'
 
 export type CliIo = {
+  stdin?: () => Promise<string>
   stderr: (chunk: string) => void
   stdout: (chunk: string) => void
 }
 
 const defaultIo: CliIo = {
   stderr: (chunk) => process.stderr.write(chunk),
+  stdin: readProcessStdin,
   stdout: (chunk) => process.stdout.write(chunk),
 }
 
@@ -21,13 +24,46 @@ export async function runCli(args: readonly string[], io: CliIo = defaultIo): Pr
     return 0
   }
   try {
-    const { startDock } = await import('./start-dock.js')
-    await startDock({ args })
-    return 0
+    const cli = parseCliOptions(args)
+    if (cli.print) {
+      const { startHeadless } = await import('./headless/start-headless.js')
+      const abort = new AbortController()
+      const onInterrupt = () => abort.abort('SIGINT')
+      process.once('SIGINT', onInterrupt)
+      try {
+        const stdin = await (io.stdin ?? defaultIo.stdin)?.()
+        try {
+          return await startHeadless({
+            args,
+            cli,
+            io,
+            signal: abort.signal,
+            ...(stdin !== undefined ? { stdin } : {}),
+          })
+        } catch (error) {
+          if (!abort.signal.aborted) throw error
+          io.stderr('Execution aborted\n')
+          return 130
+        }
+      } finally {
+        process.removeListener('SIGINT', onInterrupt)
+      }
+    } else {
+      const { startDock } = await import('./start-dock.js')
+      await startDock({ args, cli })
+      return 0
+    }
   } catch (error) {
     io.stderr(`${error instanceof Error ? error.message : String(error)}\n`)
     return 1
   }
+}
+
+async function readProcessStdin(): Promise<string> {
+  if (process.stdin.isTTY) return ''
+  const chunks: Buffer[] = []
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk))
+  return Buffer.concat(chunks).toString('utf8')
 }
 
 const entrypoint = process.argv[1]

@@ -51,7 +51,7 @@ export class UserInteractionBroker {
     })
     const job = this.#tail.then(async () => {
       if (signal.aborted) throw new Error('User interaction cancelled')
-      if (!this.#handler) throw new Error('User interaction is unavailable')
+      if (!this.#handler) throw new Error('User interaction is unavailable in headless mode')
       return Promise.race([
         this.#handler({ ...request, signal } as UserInteractionRequest),
         aborted,
