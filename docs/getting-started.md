@@ -48,6 +48,14 @@ dock
 找不到对应环境变量或本地凭据时，Dock 会使用隐藏输入读取 API key。第一次进入项目还会
 询问 workspace trust；确认前不读取项目设置、项目指令或项目 Skills。
 
+配置完成后，也可以不启动 TUI，执行一次任务并退出：
+
+```bash
+dock -p "检查这个项目"
+```
+
+输出格式、权限和自动化行为见 [Headless 模式](headless.md)。
+
 ## 从源码运行
 
 开发环境需要 Node.js 24、pnpm 10.34.5 和 Git：

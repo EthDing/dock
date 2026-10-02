@@ -70,4 +70,6 @@ permission mode 可选 `default`、`acceptEdits`、`plan`、`dontAsk` 和
 `bypassPermissions`。`worktree.baseRef` 可选 `fresh` 或 `head`。
 
 启动参数包括 `--continue`、`--resume`、`--fork-session`、`--model`、`--name` 和
-`--permission-mode`。运行 `dock --version` 查看版本。
+`--permission-mode`。Headless 模式还支持 `-p/--print`、`--max-turns`、
+`--output-format` 和 `--no-memory`，详见 [Headless 模式](headless.md)。运行
+`dock --version` 查看版本。

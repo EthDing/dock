@@ -4,6 +4,7 @@ Dock 是运行在终端中的 coding agent。目前支持 Linux 和 WSL2，macOS
 Windows 原生暂不支持。
 
 - [开始使用](getting-started.md)：安装、首次启动、更新和卸载。
+- [Headless 模式](headless.md)：一次性执行、输出格式和非交互权限行为。
 - [配置](configuration.md)：provider、model、权限、sandbox 和运行设置。
 - [工具](tools.md)：文件、命令、交互、任务、网络和子 Agent 工具。
 - [权限与 sandbox](permissions-and-sandbox.md)：审批规则与操作系统隔离。
