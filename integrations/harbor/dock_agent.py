@@ -172,7 +172,9 @@ else
 fi
 for bin in node npm npx; do
   target=$(command -v "$bin")
-  ln -sfn "$target" "/usr/local/bin/$bin"
+  if [ "$target" != "/usr/local/bin/$bin" ]; then
+    ln -sfn "$target" "/usr/local/bin/$bin"
+  fi
 done
 """
         if self._archive_path is not None:

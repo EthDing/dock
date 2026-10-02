@@ -5,6 +5,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,78 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from integrations.harbor.dock_agent import DockAgent, convert_dock_session, find_root_session
+
+
+class DockInstallationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_archive_install_preserves_existing_node_binaries(self) -> None:
+        await self._check_archive_install(existing_at_destination=True)
+
+    async def test_archive_install_links_node_binaries_from_another_directory(
+        self,
+    ) -> None:
+        await self._check_archive_install(existing_at_destination=False)
+
+    async def _check_archive_install(self, *, existing_at_destination: bool) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            destination = root / "bin"
+            destination.mkdir()
+            source = destination if existing_at_destination else root / "node-bin"
+            source.mkdir(exist_ok=True)
+            for name in ("node", "npm", "npx"):
+                executable = source / name
+                executable.write_text("#!/bin/sh\nprintf '24\\n'\n")
+                executable.chmod(0o755)
+            package = root / "package"
+            (package / "dist").mkdir(parents=True)
+            (package / "dist/cli.js").write_text(
+                "#!/bin/sh\nprintf 'installed-dock\\n'\n"
+            )
+            archive = root / "dock-linux.tar.gz"
+            with tarfile.open(archive, "w:gz") as contents:
+                contents.add(package, arcname=".")
+            agent = DockAgent(
+                logs_dir=root / "logs",
+                model_name="openai/gpt-test",
+                archive_path=archive,
+            )
+            environment = SimpleNamespace(upload_file=AsyncMock())
+
+            async def execute(_environment, *, command, timeout_sec):
+                self.assertEqual(timeout_sec, 600)
+                self.assertNotIn("pnpm install", command)
+                self.assertNotIn("pnpm build", command)
+                # Run the real installer shell, redirecting its container-only
+                # paths into this test's private directory.
+                command = command.replace("/usr/local/bin", str(destination))
+                command = command.replace("/opt/dock", str(root / "installed"))
+                command = command.replace("/tmp/dock-release.tar.gz", str(archive))
+                result = subprocess.run(
+                    ["/bin/bash", "-c", command],
+                    cwd=root,
+                    env={"PATH": f"{source}:{destination}:/usr/bin:/bin"},
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(), "installed-dock")
+
+            with patch.object(
+                agent, "ensure_system_dependencies", new_callable=AsyncMock
+            ), patch.object(
+                agent,
+                "exec_as_root",
+                new=AsyncMock(side_effect=execute),
+            ):
+                await agent.install(environment)
+            environment.upload_file.assert_awaited_once_with(
+                archive, "/tmp/dock-release.tar.gz"
+            )
+            for name in ("node", "npm", "npx"):
+                executable = destination / name
+                self.assertEqual(executable.is_symlink(), not existing_at_destination)
+                self.assertEqual(executable.resolve(), (source / name).resolve())
+                self.assertEqual(executable.read_text(), "#!/bin/sh\nprintf '24\\n'\n")
 
 
 class DockEvalRunTests(unittest.IsolatedAsyncioTestCase):
