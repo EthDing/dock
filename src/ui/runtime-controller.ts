@@ -72,8 +72,8 @@ export class RuntimeController implements DockUiController {
       }
     )
   }
-  async *submit(text: string): AsyncIterable<UiEvent> {
-    yield* this.#events(this.#controller.submit(text))
+  async *submit(text: string, options: { maxTurns?: number } = {}): AsyncIterable<UiEvent> {
+    yield* this.#events(this.#controller.submit(text, options))
   }
   async *activateSkill(name: string, invocationInput?: string): AsyncIterable<UiEvent> {
     if (!this.#controller.activateSkill) throw new Error('Skills are unavailable')

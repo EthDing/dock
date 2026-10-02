@@ -449,6 +449,18 @@ describe('runAgentLoop', () => {
 
     expect(result.reason).toBe('max_turns')
     expect(executions).toBe(0)
+    expect(result.messages.at(-1)).toMatchObject({
+      type: 'user',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            toolUseId: 'tool-1',
+            isError: true,
+          },
+        ],
+      },
+    })
   })
 
   it('does not call the model when already aborted', async () => {

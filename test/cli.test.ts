@@ -27,4 +27,14 @@ describe('dock CLI', () => {
 
     expect(isEntrypoint(pathToFileURL(modulePath).href, binPath)).toBe(true)
   })
+
+  it('rejects headless-only flags without print mode', async () => {
+    const errors: string[] = []
+    const exitCode = await runCli(['--max-turns', '2'], {
+      stderr: (chunk) => errors.push(chunk),
+      stdout: () => {},
+    })
+    expect(exitCode).toBe(1)
+    expect(errors.join('')).toContain('--max-turns is only available with --print')
+  })
 })
