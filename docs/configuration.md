@@ -33,6 +33,10 @@ Dock 使用 JSON 设置，按以下顺序加载，后者覆盖前者：
 `baseUrl` 可以将 OpenAI protocol 指向兼容 endpoint。环境变量中的 key 优先于
 `~/.dock/.credentials.json` 中的凭据。
 
+未配置 `maxOutputTokens` 时，三个 protocol 的输出上限均为 32000；上面的 8192 是显式覆盖示例。
+压缩摘要使用 `min(主请求上限, 20000)`。如果 API 因输出上限过大返回 400，
+请在对应 provider 的设置中调小 `maxOutputTokens`；Dock 不会自动调低或重试。
+
 ## 常用设置
 
 ```json

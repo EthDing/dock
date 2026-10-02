@@ -41,7 +41,7 @@ const request: ModelRequest = {
 }
 const base = { messages, request, trigger: 'manual' as const, signal: new AbortController().signal }
 describe('ordinary compaction', () => {
-  it.each([8192, 20_000, 64_000, undefined])(
+  it.each([8192, 20_000, 32_000, 64_000, undefined])(
     'caps summary output on both the fork and fallback for a model limit of %s',
     async (maxOutputTokens) => {
       const model = new FakeModelAdapter([response('', true), response('fallback summary')])
@@ -53,7 +53,7 @@ describe('ordinary compaction', () => {
       await compactConversation({ ...base, request: summaryRequest, model })
       expect(model.requests).toHaveLength(2)
       for (const sent of model.requests) {
-        expect(sent.maxOutputTokens).toBe(Math.min(maxOutputTokens ?? 8192, 20_000))
+        expect(sent.maxOutputTokens).toBe(Math.min(maxOutputTokens ?? 32_000, 20_000))
       }
       expect(summaryRequest.maxOutputTokens).toBe(maxOutputTokens)
     },

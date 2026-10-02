@@ -32,6 +32,7 @@ async function setup(
     },
   },
   contextWindow = 200000,
+  maxOutputTokens: number | null = 64,
 ) {
   const cwd = await mkdtemp(join(tmpdir(), 'dock-agent-runtime-')),
     configDir = join(cwd, 'config'),
@@ -55,7 +56,7 @@ async function setup(
   const resolveModel = vi.fn(async (_reference: string) => ({
     model,
     modelId: 'model',
-    provider: { contextWindow, maxOutputTokens: 64 },
+    provider: { contextWindow, ...(maxOutputTokens === null ? {} : { maxOutputTokens }) },
   }))
   const options = {
     resolveModel,
@@ -138,6 +139,12 @@ async function setup(
     resolveModel,
   }
 }
+it('uses the 32000 default for subagent output and the unchanged compaction threshold formula', async () => {
+  const s = await setup(undefined, 200_000, null)
+  expect(s.runtime.maxOutputTokens).toBe(32_000)
+  expect(s.runtime.contextManager?.analyze([]).threshold).toBe(167_000)
+  await s.manager.close()
+})
 it('loads fresh project context without memory and resolves the selected model', async () => {
   const s = await setup()
   expect(s.metadata.userContext).toEqual({ AGENTS: 'current rules' })

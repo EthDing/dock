@@ -101,6 +101,27 @@ async function run(
 }
 
 describe('headless runtime', () => {
+  it('uses 32000 for the main request when the provider has no explicit output limit', async () => {
+    const { root, homeDir } = await fixture()
+    const settingsPath = join(homeDir, '.dock', 'settings.json')
+    const settings = JSON.parse(await readFile(settingsPath, 'utf8'))
+    delete settings.providers.fake.maxOutputTokens
+    await writeFile(settingsPath, JSON.stringify(settings))
+    const args = ['-p', '--no-memory', 'work']
+    const model = new FakeModelAdapter([finalResponse('done')])
+    expect(
+      await startHeadless({
+        args,
+        cli: parseCliOptions(args),
+        cwd: root,
+        homeDir,
+        environment: { FAKE_API_KEY: 'test-key' },
+        modelFactory: () => model,
+        io: { stdout: () => {}, stderr: () => {} },
+      }),
+    ).toBe(0)
+    expect(model.requests[0]?.maxOutputTokens).toBe(32_000)
+  })
   it.each(['none', 'full', 'head5k', 'pointer'] as const)(
     'wires eval environment and persists %s restoration metrics',
     async (mode) => {
