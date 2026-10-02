@@ -2,7 +2,10 @@ node_modules/
 dist/
 coverage/
 .release/
+.harbor-cache/
 *.log
+__pycache__/
+*.py[cod]
 
 .env
 .env.*

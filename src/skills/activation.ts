@@ -30,8 +30,10 @@ export class SkillActivator {
   sync(messages: readonly TranscriptMessage[]): void {
     this.#active.clear()
     for (const message of messages)
-      if (message.type === 'user' && message.skillContext)
-        this.#active.set(message.skillContext.name, message.skillContext.contentHash)
+      if (message.type === 'user' && message.skillContext) {
+        if (message.skillContext.isPartial) this.#active.delete(message.skillContext.name)
+        else this.#active.set(message.skillContext.name, message.skillContext.contentHash)
+      }
   }
 
   async activate(name: string, invocationInput?: string): Promise<SkillActivationResult> {

@@ -32,7 +32,7 @@ import type { MemoryManager } from '../memory/memory-manager.js'
 import { findProjectRoot } from '../config/load-settings.js'
 import { createSkillTool, SkillActivator } from '../skills/activation.js'
 import { discoverSkills, inheritedSkillRegistry, isSkillResourcePath } from '../skills/registry.js'
-import { prepareSkillRestoration } from '../skills/context.js'
+import { prepareSkillRestorationWithMetadata, type SkillRestoreMode } from '../skills/context.js'
 import type { UserInteractionBroker } from '../interaction/user-interaction-broker.js'
 import type { TaskStore } from '../tasks/task-store.js'
 import { createInteractionTools } from '../tools/interaction-tools.js'
@@ -59,6 +59,7 @@ export async function createSubagentRuntime(options: {
   homeDir: string
   persistApproval: (rule: string) => Promise<void>
   transcriptPath: string
+  skillRestoreMode?: SkillRestoreMode
 }): Promise<SubagentRuntime> {
   const { metadata: meta } = options
   const { model, modelId, provider } = await options.resolveModel(meta.modelReference)
@@ -216,9 +217,11 @@ export async function createSubagentRuntime(options: {
           )
         },
       })
+      const skills = prepareSkillRestorationWithMetadata(messages, options.skillRestoreMode)
       return {
         ...restored,
-        attachments: [...restored.attachments, ...prepareSkillRestoration(messages)],
+        skillRestoration: skills.skillRestoration,
+        attachments: [...restored.attachments, ...skills.attachments],
         userContext: meta.contextMode === 'fresh' ? fresh : loaded,
       }
     },

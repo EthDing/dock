@@ -5,6 +5,7 @@ import {
 } from '../messages/create-message.js'
 import { collectAssistantResponse } from '../model/stream-response.js'
 import type { AssistantMessage, ModelAdapter, ModelRequest, Usage } from '../model/types.js'
+import type { SkillRestorationMetadata } from '../skills/context.js'
 import {
   formatCompactSummary,
   getCompactPrompt,
@@ -20,6 +21,8 @@ export type CompactionRequest = {
   transcriptPath?: string
 }
 export type CompactionResult = {
+  skillRestoration?: SkillRestorationMetadata
+  evalCompactAfter?: number
   summaryMessages: readonly UserTranscriptMessage[]
   attachments: readonly UserTranscriptMessage[]
   usage: Usage

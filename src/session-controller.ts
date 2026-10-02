@@ -5,6 +5,7 @@ import type { AgentSnapshot } from './agents/types.js'
 import type { FileHistory } from './checkpoint/file-history.js'
 import { buildPostCompactMessages } from './context/compaction.js'
 import type { ContextManager } from './context/context-manager.js'
+import type { EvalCompaction } from './context/eval-compaction.js'
 import type { UserTranscriptMessage } from './messages/create-message.js'
 import { createUserMessage, type TranscriptMessage } from './messages/create-message.js'
 import type { ModelAdapter } from './model/types.js'
@@ -35,6 +36,7 @@ export class SessionController {
   readonly #writer: SessionWriter
   readonly #canUseTool: CanUseTool | undefined
   readonly #contextManager: ContextManager | undefined
+  readonly #evalCompaction: EvalCompaction | undefined
   readonly #permissionModeState: PermissionModeState | undefined
   readonly #turnComplete: TurnCompleteWork | undefined
   readonly #skillActivator: SkillActivator | undefined
@@ -58,6 +60,7 @@ export class SessionController {
     }
     canUseTool?: CanUseTool
     contextManager?: ContextManager
+    evalCompaction?: EvalCompaction
     fileHistory: FileHistory
     initialMessages?: readonly TranscriptMessage[]
     initialDisplayMessages?: readonly TranscriptMessage[]
@@ -78,6 +81,7 @@ export class SessionController {
     this.#inbox = options.inbox
     this.#canUseTool = options.canUseTool
     this.#contextManager = options.contextManager
+    this.#evalCompaction = options.evalCompaction
     this.#fileHistory = options.fileHistory
     this.#messages = [...(options.initialMessages ?? [])]
     this.#displayMessages = [...(options.initialDisplayMessages ?? options.initialMessages ?? [])]
@@ -197,6 +201,7 @@ export class SessionController {
       generator = runAgentLoop({
         ...(this.#canUseTool ? { canUseTool: this.#canUseTool } : {}),
         ...(this.#contextManager ? { contextManager: this.#contextManager } : {}),
+        ...(this.#evalCompaction ? { evalCompaction: this.#evalCompaction } : {}),
         ...(this.#identity ? { getAgentIdentity: this.#identity } : {}),
         ...(this.#inbox
           ? {

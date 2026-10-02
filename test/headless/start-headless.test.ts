@@ -8,6 +8,7 @@ import { startHeadless } from '../../src/headless/start-headless.js'
 import { FakeModelAdapter } from '../../src/model/fake-model.js'
 import type { ModelStreamEvent } from '../../src/model/types.js'
 import { findMostRecentSession } from '../../src/sessions/session-manager.js'
+import { loadSession } from '../../src/sessions/session-store.js'
 import { createDockRuntime } from '../../src/runtime/create-runtime.js'
 import type { SandboxManagerApi } from '../../src/sandbox/dock-sandbox.js'
 
@@ -100,6 +101,66 @@ async function run(
 }
 
 describe('headless runtime', () => {
+  it.each(['none', 'full', 'head5k', 'pointer'] as const)(
+    'wires eval environment and persists %s restoration metrics',
+    async (mode) => {
+      const { root, homeDir } = await fixture()
+      const directory = join(root, '.dock', 'skills', 'review')
+      await mkdir(directory, { recursive: true })
+      await writeFile(
+        join(directory, 'SKILL.md'),
+        `---\nname: review\ndescription: Review code\n---\n${'x'.repeat(25_000)}\nTAIL`,
+      )
+      const file = join(root, 'file.txt')
+      await writeFile(file, 'data')
+      const model = new FakeModelAdapter([
+        toolResponse('Skill', { name: 'review' }, 'activate'),
+        toolResponse('Read', { file_path: file }, 'read'),
+        finalResponse('compact summary', 'summary'),
+        finalResponse('done'),
+      ])
+      const code = await startHeadless({
+        args: ['-p', '--no-memory', 'work'],
+        cli: parseCliOptions(['-p', '--no-memory', 'work']),
+        cwd: root,
+        homeDir,
+        environment: {
+          FAKE_API_KEY: 'test-key',
+          DOCK_EVAL_SKILL_RESTORE: mode,
+          DOCK_EVAL_COMPACT_AFTER: '1',
+        },
+        modelFactory: () => model,
+        io: { stdout: () => {}, stderr: () => {} },
+      })
+      expect(code).toBe(0)
+      expect(model.requests).toHaveLength(4)
+      const latest = await findMostRecentSession({ configDir: join(homeDir, '.dock'), cwd: root })
+      if (!latest) throw new Error('Missing session')
+      const loaded = await loadSession({
+        configDir: join(homeDir, '.dock'),
+        cwd: root,
+        sessionId: latest.sessionId,
+      })
+      const boundary = loaded.records.find((record) => record.type === 'compact_boundary')
+      expect(boundary).toMatchObject({
+        metadata: { evalCompactAfter: 1, skillRestoration: { mode } },
+      })
+      if (boundary?.type !== 'compact_boundary') throw new Error('Missing boundary')
+      const metric = boundary.metadata?.skillRestoration?.skills[0]
+      const restored = loaded.messages.find(
+        (message) => message.type === 'user' && message.skillContext?.name === 'review',
+      )
+      const text =
+        restored?.message.content
+          .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+          .join('\n') ?? ''
+      expect(metric?.tokens).toBe(Math.ceil(text.length / 4))
+      if (mode === 'none') expect(metric?.tokens).toBe(0)
+      if (mode === 'head5k') expect(metric?.tokens).toBe(5000)
+      if (mode === 'full') expect(text).toContain('TAIL')
+      if (mode === 'pointer') expect(text).toContain('Skill tool or Read')
+    },
+  )
   it('prints only the final assistant text in text mode', async () => {
     const result = await run('text', new FakeModelAdapter([finalResponse('done')]))
     expect(result.code).toBe(0)
