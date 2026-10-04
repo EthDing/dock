@@ -58,3 +58,8 @@ permission mode 和 sandbox auto-allow 仍然适用。`AskUserQuestion` 和需�
 
 Session 仍然写入磁盘，可以稍后在 TUI 中 resume。子 Agent 在 headless 中以前台方式
 运行；主任务不会在子 Agent 尚未完成时退出。
+
+`dock -p --permission-mode auto "任务"` 会用分类器审批未预先允许的工具调用。拦截作为错误
+tool_result 返回，模型可以选择安全替代方案；连续 3 次／累计 20 次拦截也不会结束进程，
+被拦的操作仍不执行，后续调用继续检查。超时或分类失败同样拒绝执行。显式 ask 规则仍拒绝，
+不会转给分类器放行；`--max-turns` 等已有结束条件不变。

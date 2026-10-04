@@ -83,5 +83,5 @@ function isOutputFormat(value: string): value is HeadlessOutputFormat {
 }
 
 function isPermissionMode(value: string): value is PermissionMode {
-  return ['default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions'].includes(value)
+  return ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'].includes(value)
 }

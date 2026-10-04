@@ -245,7 +245,12 @@ export class SubagentManager {
       if (input.isolation === 'worktree')
         meta.worktree = await this.#worktrees.create(parent.cwd, id, this.#options.baseRef)
       meta.cwd = meta.worktree?.path ?? parent.cwd
-      const context = buildChildContext(parent, { ...input, context: mode }, meta.cwd)
+      const context = buildChildContext(
+        parent,
+        { ...input, context: mode },
+        meta.cwd,
+        options.fromUser,
+      )
       meta.systemPrompt = context.systemPrompt
       meta.userContext = context.userContext
       if (mode === 'fork')
@@ -335,7 +340,7 @@ export class SubagentManager {
           },
         ],
       },
-      { ...(options.fromUser ? {} : { isMeta: true }) },
+      { ...(options.fromUser ? { isUserSubmission: true } : { isMeta: true }) },
     )
     if (to === 'main') {
       await this.#enqueueRoot(sessionId, entry)

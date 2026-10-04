@@ -1,7 +1,14 @@
 import type { JsonObject } from '../model/types.js'
 import type { AgentTool } from '../tools/types.js'
+import { autoPermissionRules } from './auto-rules.js'
 
-export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'dontAsk' | 'bypassPermissions'
+export type PermissionMode =
+  | 'default'
+  | 'acceptEdits'
+  | 'plan'
+  | 'auto'
+  | 'dontAsk'
+  | 'bypassPermissions'
 
 export type PermissionRules = {
   allow?: readonly string[]
@@ -10,6 +17,7 @@ export type PermissionRules = {
 }
 
 export type PermissionSource =
+  | 'auto'
   | 'circuit_breaker'
   | 'fallback'
   | 'interaction'
@@ -43,6 +51,7 @@ export async function resolvePermission(
   input: JsonObject,
   context: ToolPermissionContext,
 ): Promise<PermissionDecision> {
+  if (context.mode === 'auto') context = { ...context, rules: autoPermissionRules(context.rules) }
   // The order mirrors Claude Code's permission spine. Moving whole-tool allow
   // or bypass earlier would let them override tool-specific safety decisions.
   const wholeDeny = findWholeToolRule(context.rules, 'deny', tool.name)
@@ -58,6 +67,8 @@ export async function resolvePermission(
     source: 'tool' as const,
   }
   if (toolResult.behavior === 'deny') return toolResult
+  // Protected paths must reach the classifier even with whole-tool allows.
+  if (toolResult.behavior === 'ask' && toolResult.source === 'auto') return toolResult
   if (
     toolResult.behavior === 'ask' &&
     (toolResult.source === 'rule' ||
@@ -167,6 +178,7 @@ function canSandboxReplaceWholeAsk(
   return (
     tool.name === 'Bash' &&
     context.mode !== 'plan' &&
+    context.mode !== 'auto' &&
     context.autoAllowBashIfSandboxed?.() === true &&
     context.isBashSandboxed?.(tool, input) === true
   )

@@ -8,8 +8,10 @@ import {
 } from './evaluate-permission.js'
 import type { PermissionApproval, PermissionCallIdentity } from './permission-broker.js'
 import type { SessionPermissionState } from './session-permission-state.js'
+import type { AutoClassifier, AutoPermissionState } from './auto-classifier.js'
 
 export function createCanUseTool(options: {
+  auto?: { classifier: AutoClassifier; state: AutoPermissionState; interactive: boolean }
   autoAllowInternalToolUse?: (tool: AgentTool, input: JsonObject) => boolean
   autoAllowBashIfSandboxed?: () => boolean
   isBashSandboxed?: (tool: AgentTool, input: JsonObject) => boolean
@@ -55,7 +57,37 @@ export function createCanUseTool(options: {
       decision.source === 'circuit_breaker' ||
       decision.source === 'interaction'
     if (!forcedAsk && options.sessionPermissions?.isAllowed(tool, decisionInput)) {
-      return { behavior: 'allow', updatedInput: decisionInput }
+      if ((typeof options.mode === 'function' ? options.mode() : options.mode) !== 'auto')
+        return { behavior: 'allow', updatedInput: decisionInput }
+    }
+
+    if (
+      !forcedAsk &&
+      (typeof options.mode === 'function' ? options.mode() : options.mode) === 'auto'
+    ) {
+      const auto = options.auto
+      if (!auto)
+        return {
+          behavior: 'deny',
+          message:
+            'Auto classifier is not configured. Try a safer approach; do not bypass this block.',
+        }
+      if (!auto.interactive || !auto.state.requiresHuman) {
+        const verdict = await auto.classifier.classify(tool.name, decisionInput, execution)
+        // Once escalated, concurrent in-flight approvals also need human review.
+        const escalated = auto.interactive && auto.state.requiresHuman
+        auto.state.record(verdict)
+        if (verdict.behavior === 'deny')
+          return {
+            behavior: 'deny',
+            message: `Auto mode blocked ${tool.name}: ${verdict.message} Try a safer approach; do not bypass this block.${auto.interactive && auto.state.requiresHuman ? ' Further reviewed actions require human approval.' : ''}`,
+          }
+        if (!escalated) return { behavior: 'allow', updatedInput: decisionInput }
+      }
+      // Keep auto's filtered rules while falling back to the existing broker;
+      // restoring blanket Bash rules here would silently undo the escalation.
+      decision.message = 'Auto mode reached its denial limit; human approval is required'
+      decision.source = 'auto'
     }
 
     const approval = await options.requestApproval(

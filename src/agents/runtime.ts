@@ -40,7 +40,11 @@ import { createInteractionTools } from '../tools/interaction-tools.js'
 import { createTaskTools } from '../tools/task-tools.js'
 import { createWebFetchTool } from '../tools/web-fetch-tool.js'
 
-export type AgentPolicy = { rules: PermissionRules; sessionPermissions: SessionPermissionState }
+export type AgentPolicy = {
+  rules: PermissionRules
+  sessionPermissions: SessionPermissionState
+  auto?: Parameters<typeof createCanUseTool>[0]['auto']
+}
 export async function createSubagentRuntime(options: {
   metadata: AgentMetadata
   parent?: AgentSnapshot | undefined
@@ -163,6 +167,7 @@ export async function createSubagentRuntime(options: {
   const canUseTool: NonNullable<SubagentRuntime['canUseTool']> = async (tool, input, execution) => {
     const policy = options.policyFor(meta.sessionId)
     return createCanUseTool({
+      ...(policy.auto ? { auto: policy.auto } : {}),
       persistApproval: options.persistApproval,
       rules: policy.rules,
       sessionPermissions: policy.sessionPermissions,

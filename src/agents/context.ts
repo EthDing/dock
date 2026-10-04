@@ -10,6 +10,7 @@ export function buildChildContext(
   parent: AgentSnapshot,
   input: AgentSpawnInput,
   cwd: string,
+  fromUser = false,
 ): {
   messages: readonly TranscriptMessage[]
   systemPrompt: readonly string[]
@@ -28,7 +29,10 @@ export function buildChildContext(
       ],
       userContext,
       messages: [
-        createUserMessage({ content: [{ type: 'text', text: input.prompt + worktreeNotice }] }),
+        createUserMessage(
+          { content: [{ type: 'text', text: input.prompt + worktreeNotice }] },
+          fromUser ? { isUserSubmission: true } : { isMeta: true },
+        ),
       ],
     }
   }
@@ -56,6 +60,13 @@ export function buildChildContext(
       { isMeta: true },
     ),
   )
+  if (fromUser)
+    messages.push(
+      createUserMessage(
+        { content: [{ type: 'text', text: input.prompt }] },
+        { isUserSubmission: true },
+      ),
+    )
   return {
     messages,
     systemPrompt: [...parent.systemPrompt],

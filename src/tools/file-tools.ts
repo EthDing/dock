@@ -5,6 +5,7 @@ import type { FileHistory } from '../checkpoint/file-history.js'
 import type { JsonObject } from '../model/types.js'
 import { findContentRule } from '../permissions/evaluate-permission.js'
 import { matchesPathSpecifier } from '../permissions/specifier-matching.js'
+import { autoFileScope } from '../permissions/auto-paths.js'
 import type { AgentTool, AgentToolResult } from './types.js'
 import type { FileReadState } from './file-read-state.js'
 
@@ -214,13 +215,13 @@ export function createEditTool(dependencies: FileToolDependencies): AgentTool {
   return tool
 }
 
-function checkFilePermission(
+async function checkFilePermission(
   tool: AgentTool,
   input: JsonObject,
   context: Parameters<NonNullable<AgentTool['checkPermissions']>>[1],
   cwd: string,
   readOnly: boolean,
-): ReturnType<NonNullable<AgentTool['checkPermissions']>> {
+): Promise<Awaited<ReturnType<NonNullable<AgentTool['checkPermissions']>>>> {
   const filePath = typeof input.file_path === 'string' ? input.file_path : ''
   const matchesSpecifier = (pattern: string) =>
     Boolean(filePath) && matchesPathSpecifier(pattern, filePath, cwd)
@@ -241,6 +242,16 @@ function checkFilePermission(
       rule: askRule,
       source: 'rule',
     }
+  }
+  if (context.mode === 'auto') {
+    const scope = await autoFileScope(cwd, filePath)
+    if (!readOnly && scope.protected)
+      return { behavior: 'ask', source: 'auto', updatedInput: input }
+    if (scope.inside) return { behavior: 'allow', source: 'mode', updatedInput: input }
+    const allow = findContentRule(context.rules, 'allow', tool.name, matchesSpecifier)
+    return allow
+      ? { behavior: 'allow', source: 'rule', rule: allow, updatedInput: input }
+      : { behavior: 'passthrough', source: 'tool', updatedInput: input }
   }
   if (context.autoAllowInternalToolUse?.(tool, input)) {
     return { behavior: 'allow', source: 'internal', updatedInput: input }

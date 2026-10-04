@@ -21,6 +21,33 @@ const controller = (): DockUiController => ({
 })
 
 describe('user interaction and unified tasks', () => {
+  it('offers plan approval into auto', async () => {
+    const terminal = new VirtualTerminal(80, 24)
+    const broker = new UserInteractionBroker()
+    const app = new DockTuiApp({
+      controller: controller(),
+      tui: new TuiAltScreen(terminal),
+      userInteractionBroker: broker,
+    })
+    app.start()
+    const answer = broker.request(
+      {
+        type: 'plan',
+        plan: 'Implement the feature',
+        requester: { label: 'Main', sessionId: asSessionId(randomUUID()) },
+      },
+      new AbortController().signal,
+    )
+    await terminal.waitForRender()
+    expect(stripVTControlCharacters(terminal.getViewport().join('\n'))).toContain(
+      'Approve · auto permissions',
+    )
+    terminal.sendInput('\x1b[B')
+    terminal.sendInput('\x1b[B')
+    terminal.sendInput('\r')
+    await expect(answer).resolves.toEqual({ type: 'plan', decision: 'approve_auto' })
+    await app.stop()
+  })
   it('renders a broker question in the bottom panel and returns the selection', async () => {
     const terminal = new VirtualTerminal(80, 24)
     const broker = new UserInteractionBroker()

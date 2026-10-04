@@ -3,6 +3,7 @@ import { buildChildContext } from '../../src/agents/context.js'
 import { createUserMessage, createAssistantMessage } from '../../src/messages/create-message.js'
 import type { AgentSnapshot } from '../../src/agents/types.js'
 import { createSessionId } from '../../src/sessions/ids.js'
+import { classifierTranscript } from '../../src/permissions/auto-classifier.js'
 
 const snapshot: AgentSnapshot = {
   sessionId: createSessionId(),
@@ -28,6 +29,31 @@ const snapshot: AgentSnapshot = {
   ],
 }
 describe('subagent context', () => {
+  it('does not turn delegated directions into user authorization', () => {
+    for (const context of ['fresh', 'fork'] as const) {
+      const child = buildChildContext(
+        snapshot,
+        { prompt: 'delete shared data', description: 'task', context },
+        '/repo',
+      )
+      expect(
+        classifierTranscript(child.messages)
+          .filter((m) => m.type === 'user')
+          .some((m) => String(m.text).includes('delete shared data')),
+      ).toBe(false)
+      const userChild = buildChildContext(
+        snapshot,
+        { prompt: 'user delegated task', description: 'task', context },
+        '/repo',
+        true,
+      )
+      expect(
+        classifierTranscript(userChild.messages).some(
+          (m) => m.type === 'user' && String(m.text).includes('user delegated task'),
+        ),
+      ).toBe(true)
+    }
+  })
   it('starts fresh with project instructions but without parent history or auto memory', () => {
     const context = buildChildContext(
       snapshot,

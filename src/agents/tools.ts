@@ -53,7 +53,10 @@ export function createAgentTools(manager: SubagentManager): AgentTool[] {
         },
       },
       parseInput: (input) => spawnSchema.parse(input),
-      checkPermissions: () => ({ behavior: 'allow', source: 'tool' }),
+      checkPermissions: (_input, context) => ({
+        behavior: context.mode === 'auto' ? 'passthrough' : 'allow',
+        source: 'tool',
+      }),
       isConcurrencySafe: () => true,
       async execute(input, execution) {
         const agent = await manager.spawn(snapshot(execution), spawnSchema.parse(input), {
@@ -80,7 +83,10 @@ export function createAgentTools(manager: SubagentManager): AgentTool[] {
         },
       },
       parseInput: (input) => messageSchema.parse(input),
-      checkPermissions: () => ({ behavior: 'allow', source: 'tool' }),
+      checkPermissions: (_input, context) => ({
+        behavior: context.mode === 'auto' ? 'passthrough' : 'allow',
+        source: 'tool',
+      }),
       isConcurrencySafe: () => true,
       async execute(input, execution) {
         const parsed = messageSchema.parse(input),

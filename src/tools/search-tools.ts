@@ -4,6 +4,7 @@ import { isAbsolute, relative, resolve } from 'node:path'
 import fg from 'fast-glob'
 import { z } from 'zod'
 import { findContentRule } from '../permissions/evaluate-permission.js'
+import { autoFileScope } from '../permissions/auto-paths.js'
 import { matchesWildcard } from '../permissions/specifier-matching.js'
 import type { AgentTool } from './types.js'
 
@@ -148,12 +149,12 @@ export function createGrepTool(options: { cwd: string }): AgentTool {
   return tool
 }
 
-function checkSearchPermission(
+async function checkSearchPermission(
   tool: AgentTool,
   input: Parameters<NonNullable<AgentTool['checkPermissions']>>[0],
   context: Parameters<NonNullable<AgentTool['checkPermissions']>>[1],
   cwd: string,
-): ReturnType<NonNullable<AgentTool['checkPermissions']>> {
+): Promise<Awaited<ReturnType<NonNullable<AgentTool['checkPermissions']>>>> {
   const matchesSpecifier = (pattern: string) =>
     typeof input.pattern === 'string' && matchesWildcard(pattern, input.pattern)
   const denyRule = findContentRule(context.rules, 'deny', tool.name, matchesSpecifier)
@@ -175,7 +176,11 @@ function checkSearchPermission(
     }
   }
   const target = resolve(cwd, optionalPath(input.path) ?? '.')
-  if (context.mode !== 'dontAsk' && isPathWithin(cwd, target)) {
+  if (
+    context.mode !== 'dontAsk' &&
+    isPathWithin(cwd, target) &&
+    (context.mode !== 'auto' || (await autoFileScope(cwd, target)).inside)
+  ) {
     return { behavior: 'allow', source: 'mode', updatedInput: input }
   }
   const allowRule = findContentRule(context.rules, 'allow', tool.name, matchesSpecifier)

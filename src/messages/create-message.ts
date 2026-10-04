@@ -2,6 +2,9 @@ import { randomUUID, type UUID } from 'node:crypto'
 import type { AssistantMessage, UserMessage } from '../model/types.js'
 
 export type UserTranscriptMessage = {
+  // Marks actual UI input in child histories, whose user role also carries
+  // agent directions. Older unmarked child directions are not authorization.
+  isUserSubmission?: true
   agentEventKey?: string
   isMeta?: true
   isCompactSummary?: true
@@ -31,6 +34,7 @@ export type AssistantTranscriptMessage = {
 export type TranscriptMessage = UserTranscriptMessage | AssistantTranscriptMessage
 
 type IdentityOptions = {
+  isUserSubmission?: true
   isMeta?: true
   isCompactSummary?: true
   skillContext?: SkillContext
@@ -43,6 +47,7 @@ export function createUserMessage(
   options: IdentityOptions = {},
 ): UserTranscriptMessage {
   return {
+    ...(options.isUserSubmission ? { isUserSubmission: true as const } : {}),
     ...(options.isMeta ? { isMeta: true as const } : {}),
     ...(options.isCompactSummary ? { isCompactSummary: true as const } : {}),
     ...(options.skillContext ? { skillContext: options.skillContext } : {}),
