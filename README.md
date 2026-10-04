@@ -27,8 +27,8 @@ dock
 在项目目录中运行 Dock，然后直接描述你想完成的工作。Dock 可以阅读代码、修改文件、
 运行命令，并在需要时请求确认。
 
-如需启用 Bash sandbox，请先在 Ubuntu 安装 `bubblewrap`、`socat` 和 `ripgrep`，然后运行
-`/sandbox`。
+Bash sandbox 依赖 `bubblewrap`、`socat` 和 `ripgrep`，在 Ubuntu 上装好后运行 `/sandbox`
+即可启用。
 
 更多使用说明见 [Dock 用户文档](docs/README.md)。
 
