@@ -434,7 +434,7 @@ export class DockTuiApp {
       this.#lastEscape = Date.now()
     }
     if (matchesKey(data, Key.shift('tab')) && !this.#busy && this.#controller.setPermissionMode) {
-      const modes: PermissionMode[] = ['default', 'acceptEdits', 'plan'],
+      const modes: PermissionMode[] = ['default', 'acceptEdits', 'plan', 'auto'],
         current = this.#controller.permissionMode as PermissionMode
       this.#controller.setPermissionMode(
         modes[(modes.indexOf(current) + 1) % modes.length] ?? 'default',
@@ -635,7 +635,7 @@ export class DockTuiApp {
       })
     if (this.#controller.setPermissionMode)
       add('permissions', 'Change permission mode', async () => {
-        const modes: PermissionMode[] = ['default', 'acceptEdits', 'plan']
+        const modes: PermissionMode[] = ['default', 'acceptEdits', 'plan', 'auto']
         if (this.#controller.permissionMode === 'bypassPermissions') modes.push('bypassPermissions')
         if (this.#controller.permissionMode === 'dontAsk') modes.push('dontAsk')
         const selected = await this.#choose(
@@ -850,6 +850,7 @@ export class DockTuiApp {
         [
           { label: 'Approve · default permissions', value: 'default' },
           { label: 'Approve · accept edits', value: 'acceptEdits' },
+          { label: 'Approve · auto permissions', value: 'auto' },
           { label: 'Keep planning with feedback', value: 'feedback' },
           { label: 'Cancel', value: 'cancel' },
         ],
@@ -857,6 +858,7 @@ export class DockTuiApp {
       )
       if (selected === 'default') return { type: 'plan', decision: 'approve_default' }
       if (selected === 'acceptEdits') return { type: 'plan', decision: 'approve_accept_edits' }
+      if (selected === 'auto') return { type: 'plan', decision: 'approve_auto' }
       if (selected === 'feedback') {
         const feedback = await this.#promptText('Plan feedback', request.plan, request.signal)
         return feedback

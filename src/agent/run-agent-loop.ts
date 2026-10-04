@@ -47,6 +47,7 @@ export type AgentLoopOptions = {
 
 export type ToolOutcome = 'success' | 'error' | 'denied' | 'aborted'
 type ToolExecutionResult = {
+  userMessage?: string
   context?: SkillActivationContext
   result: ToolResultBlock
   outcome: ToolOutcome
@@ -209,6 +210,7 @@ export async function* runAgentLoop(
 
       const toolResults: ToolResultBlock[] = []
       const additionalContexts: SkillActivationContext[] = []
+      const userMessages: string[] = []
       for (const batch of partitionToolUses(toolUses, options.tools)) {
         for (const toolUse of batch.toolUses) {
           yield { type: 'tool_execution_start', toolUse }
@@ -263,7 +265,8 @@ export async function* runAgentLoop(
           ]
         }
 
-        for (const { context, result, outcome } of batchResults) {
+        for (const { context, result, outcome, userMessage } of batchResults) {
+          if (userMessage) userMessages.push(userMessage)
           toolResults.push(result)
           evalCompaction?.observeResult(Boolean(context) && outcome === 'success')
           if (context) additionalContexts.push(context)
@@ -274,6 +277,14 @@ export async function* runAgentLoop(
       const toolResultMessage = createUserMessage({ content: toolResults })
       messages.push(toolResultMessage)
       yield { type: 'user_message', message: toolResultMessage }
+      for (const text of userMessages) {
+        const message = createUserMessage(
+          { content: [{ type: 'text', text }] },
+          { isUserSubmission: true },
+        )
+        messages.push(message)
+        yield { type: 'user_message', message }
+      }
       for (const context of additionalContexts) {
         const contextMessage = createUserMessage(
           { content: [{ text: context.text, type: 'text' }] },
@@ -402,6 +413,7 @@ async function executeToolUse(
   }
 
   return {
+    ...(result.userMessage ? { userMessage: result.userMessage } : {}),
     ...(result.context
       ? {
           context: {

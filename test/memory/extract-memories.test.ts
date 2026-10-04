@@ -66,6 +66,36 @@ async function createMemory() {
 }
 
 describe('ExtractMemories', () => {
+  it('applies the shared auto permission check after the memory boundary', async () => {
+    const memory = await createMemory()
+    const write = vi.fn(async () => ({ content: 'ok' }))
+    const canUseTool = vi.fn(async () => ({ behavior: 'deny' as const, message: 'Auto blocked' }))
+    const model = new FakeModelAdapter([
+      toolResponse('write', [
+        {
+          id: 'w',
+          name: 'Write',
+          input: { file_path: join(memory.directory, 'fact.md'), content: 'fact' },
+        },
+      ]),
+      finalResponse('done'),
+    ])
+    const extractor = new ExtractMemories({
+      memory,
+      model,
+      modelId: 'test',
+      tools: [tool('Write', write)],
+      systemPrompt: [],
+      canUseTool,
+    })
+    extractor.schedule([
+      createUserMessage({ content: [{ type: 'text', text: 'Remember my preference' }] }),
+    ])
+    await extractor.drain()
+    expect(canUseTool).toHaveBeenCalledOnce()
+    expect(write).not.toHaveBeenCalled()
+    expect(JSON.stringify(model.requests[1]?.messages)).toContain('Auto blocked')
+  })
   it('skips extraction when the main agent already wrote memory', async () => {
     const memory = await createMemory()
     const model = new FakeModelAdapter([])

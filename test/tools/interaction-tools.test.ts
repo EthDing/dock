@@ -34,6 +34,18 @@ const execution = (
 })
 
 describe('interactive tools', () => {
+  it('approves a plan into auto and carries actual consent as a user message', async () => {
+    const broker = new UserInteractionBroker()
+    broker.setHandler(async () => ({ type: 'plan', decision: 'approve_auto' }))
+    const mode = new PermissionModeState('plan')
+    const exit = createInteractionTools({ broker, mode, includePlan: true }).find(
+      (t) => t.name === 'ExitPlanMode',
+    )
+    if (!exit) throw new Error('ExitPlanMode missing')
+    const result = await exit.execute({}, execution())
+    expect(mode.value).toBe('auto')
+    expect(result.userMessage).toBe('User approved this plan for implementation:\nPlan text')
+  })
   it('returns structured question answers', async () => {
     const broker = new UserInteractionBroker()
     broker.setHandler(async () => ({

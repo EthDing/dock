@@ -26,7 +26,7 @@ export type UserInteractionResponse =
   | { type: 'questions'; answers: Record<string, string | string[]> }
   | {
       type: 'plan'
-      decision: 'approve_default' | 'approve_accept_edits' | 'feedback' | 'cancel'
+      decision: 'approve_default' | 'approve_accept_edits' | 'approve_auto' | 'feedback' | 'cancel'
       feedback?: string
     }
 export type UserInteractionRequestInput =

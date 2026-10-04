@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { resolve } from 'node:path'
 import { z } from 'zod'
 import { findContentRule } from '../permissions/evaluate-permission.js'
-import { matchesCommandSpecifier } from '../permissions/specifier-matching.js'
+import { matchesCommandSpecifier, matchesWildcard } from '../permissions/specifier-matching.js'
 import type { AgentTool } from './types.js'
 
 const MAX_TIMEOUT_MS = 600_000
@@ -103,12 +103,18 @@ export function createBashTool(options: {
       }
       if (
         context.mode !== 'plan' &&
+        context.mode !== 'auto' &&
         context.autoAllowBashIfSandboxed?.() === true &&
         context.isBashSandboxed?.(tool, input) === true
       ) {
         return { behavior: 'allow', source: 'internal', updatedInput: input }
       }
-      const allowRule = findContentRule(context.rules, 'allow', tool.name, matchesSpecifier)
+      const allowRule = findContentRule(context.rules, 'allow', tool.name, (pattern) =>
+        context.mode === 'auto'
+          ? matchesWildcard(pattern.trim(), command.trim()) &&
+            (!pattern.includes('*') || !/[;&|\n`<>]|\$\(/.test(command))
+          : matchesSpecifier(pattern),
+      )
       if (allowRule) {
         return { behavior: 'allow', rule: allowRule, source: 'rule', updatedInput: input }
       }

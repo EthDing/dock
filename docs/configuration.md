@@ -70,8 +70,12 @@ Dock 使用 JSON 设置，按以下顺序加载，后者覆盖前者：
 }
 ```
 
-permission mode 可选 `default`、`acceptEdits`、`plan`、`dontAsk` 和
+permission mode 可选 `default`、`acceptEdits`、`plan`、`auto`、`dontAsk` 和
 `bypassPermissions`。`worktree.baseRef` 可选 `fresh` 或 `head`。
+
+`permissions.auto` 可配置分类器 `model`（`provider:model`）、`environment`（环境补充文本）、
+`blockRules` 和 `allowExceptions`（补充规则数组）；默认使用会话模型和内置策略。
+详见 [Auto 权限模式](permissions-and-sandbox.md#auto-模式)。
 
 启动参数包括 `--continue`、`--resume`、`--fork-session`、`--model`、`--name` 和
 `--permission-mode`。Headless 模式还支持 `-p/--print`、`--max-turns`、

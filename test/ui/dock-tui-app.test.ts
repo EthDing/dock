@@ -267,6 +267,13 @@ describe('DockTuiApp', () => {
 
     expect(permissionMode).toBe('acceptEdits')
     expect(stripVTControlCharacters(tui.render(80).join('\n'))).toContain('acceptEdits · ready')
+    terminal.send('\u001b[Z')
+    expect(permissionMode).toBe('plan')
+    terminal.send('\u001b[Z')
+    expect(permissionMode).toBe('auto')
+    expect(stripVTControlCharacters(tui.render(80).join('\n'))).toContain('auto · ready')
+    terminal.send('\u001b[Z')
+    expect(permissionMode).toBe('default')
     await app.stop()
   })
 

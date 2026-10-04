@@ -1,4 +1,5 @@
 import type { UUID } from 'node:crypto'
+import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { type CliOptions, parseCliOptions } from '../cli-options.js'
@@ -31,8 +32,10 @@ import { MemoryNotificationBroker } from '../memory/memory-notification-broker.j
 import { UserInteractionBroker } from '../interaction/user-interaction-broker.js'
 import { createModelAdapter, getApiKeyEnvironmentName } from '../model/create-model-adapter.js'
 import type { ModelAdapter } from '../model/types.js'
+import { createUserMessage } from '../messages/create-message.js'
 import { DEFAULT_MAX_OUTPUT_TOKENS } from '../model/output-tokens.js'
 import { createCanUseTool } from '../permissions/can-use-tool.js'
+import { AutoClassifier, AutoPermissionState } from '../permissions/auto-classifier.js'
 import {
   filterDeniedTools,
   type PermissionRules,
@@ -108,6 +111,9 @@ export async function createDockRuntime(options: CreateDockRuntimeOptions): Prom
   const configDir = join(homeDir, '.dock')
   const cli = options.cli ?? parseCliOptions(options.args)
   const projectRoot = await findProjectRoot(cwd)
+  const gitRepository = await stat(join(projectRoot, '.git'))
+    .then(() => projectRoot)
+    .catch(() => undefined)
   if (cli.print) {
     if (!(await isWorkspaceTrusted({ homeDir, workspace: projectRoot })))
       throw new Error('Workspace trust is required before running in print mode')
@@ -295,6 +301,45 @@ export async function createDockRuntime(options: CreateDockRuntimeOptions): Prom
             deny: loadedSettings.settings.permissions?.deny ?? [],
           },
           sessionPermissions: new SessionPermissionState(),
+          auto: {
+            interactive: !cli.print,
+            state: new AutoPermissionState(),
+            classifier: new AutoClassifier({
+              repository: gitRepository,
+              settings: loadedSettings.settings.permissions?.auto ?? {},
+              resolveModel: (execution) =>
+                resolveModel(
+                  loadedSettings.settings.permissions?.auto?.model ??
+                    execution.agent?.modelReference ??
+                    initialModelReference,
+                ),
+              getMessages: async (execution) => {
+                const main = await loadSession({ configDir, cwd, sessionId: id })
+                const child = execution.agent?.agentId
+                  ? (await agents.snapshot(id, execution.agent.agentId)).messages
+                  : []
+                const mainIds = new Set(main.displayMessages.map((message) => message.uuid))
+                const additions = [...child, ...(execution.agent?.messages ?? [])].map((message) =>
+                  execution.agent?.agentId &&
+                  message.type === 'user' &&
+                  !mainIds.has(message.uuid) &&
+                  !message.isUserSubmission
+                    ? { ...message, isMeta: true as const }
+                    : message,
+                )
+                // Read original history, not model-generated compact summaries.
+                // Preserve source messages across compaction and deduplicate forks.
+                return [
+                  ...new Map(
+                    [...main.displayMessages, ...additions].map((message) => [
+                      message.uuid,
+                      message,
+                    ]),
+                  ).values(),
+                ].sort((left, right) => left.timestamp.localeCompare(right.timestamp))
+              },
+            }),
+          },
         }
         policies.set(id, policy)
       }
@@ -454,6 +499,7 @@ export async function createDockRuntime(options: CreateDockRuntimeOptions): Prom
         permissionRules,
       )
       const canUseTool = createCanUseTool({
+        ...(policy.auto ? { auto: policy.auto } : {}),
         autoAllowInternalToolUse: (tool, input) =>
           typeof input.file_path === 'string' &&
           ((['Read', 'Write', 'Edit'].includes(tool.name) &&
@@ -519,6 +565,17 @@ export async function createDockRuntime(options: CreateDockRuntimeOptions): Prom
       ]
       const extractMemories = memory.enabled
         ? new ExtractMemories({
+            canUseTool: (tool, input, execution) =>
+              permissionModeState.value === 'auto'
+                ? canUseTool(tool, input, execution)
+                : Promise.resolve({ behavior: 'allow' }),
+            getAgentIdentity: () => ({
+              sessionId: targetSessionId,
+              depth: 0,
+              contextMode: 'main',
+              cwd,
+              modelReference,
+            }),
             memory,
             model,
             modelId,
@@ -653,7 +710,13 @@ export async function createDockRuntime(options: CreateDockRuntimeOptions): Prom
         })
         const controller = new AbortController()
         const permission = await currentCanUseTool(currentAgentTool, input, {
-          agent: snapshot,
+          agent: {
+            ...snapshot,
+            messages: [
+              ...snapshot.messages,
+              createUserMessage({ content: [{ type: 'text', text: prompt }] }),
+            ],
+          },
           signal: controller.signal,
           toolUseId: 'user-subtask',
           parentMessageUuid: snapshot.messages.at(-1)?.uuid ?? crypto.randomUUID(),

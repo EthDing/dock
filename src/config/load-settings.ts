@@ -24,6 +24,7 @@ export type ProviderProtocol = z.infer<typeof providerProtocolSchema>
 const permissionModeSchema = z.enum([
   'default',
   'acceptEdits',
+  'auto',
   'plan',
   'dontAsk',
   'bypassPermissions',
@@ -94,6 +95,18 @@ const settingsSchema = z
       .object({
         allow: z.array(z.string()).optional(),
         ask: z.array(z.string()).optional(),
+        auto: z
+          .object({
+            model: z
+              .string()
+              .regex(/^[^:]+:.+$/)
+              .optional(),
+            environment: z.string().optional(),
+            blockRules: z.array(z.string()).optional(),
+            allowExceptions: z.array(z.string()).optional(),
+          })
+          .strict()
+          .optional(),
         defaultMode: permissionModeSchema.optional(),
         deny: z.array(z.string()).optional(),
       })
@@ -240,6 +253,22 @@ function mergePermissions(
     allow: [...(base?.allow ?? []), ...(override?.allow ?? [])],
     ask: [...(base?.ask ?? []), ...(override?.ask ?? [])],
     deny: [...(base?.deny ?? []), ...(override?.deny ?? [])],
+    ...(base?.auto || override?.auto
+      ? {
+          auto: {
+            ...base?.auto,
+            ...override?.auto,
+            environment: [base?.auto?.environment, override?.auto?.environment]
+              .filter(Boolean)
+              .join('\n'),
+            blockRules: [...(base?.auto?.blockRules ?? []), ...(override?.auto?.blockRules ?? [])],
+            allowExceptions: [
+              ...(base?.auto?.allowExceptions ?? []),
+              ...(override?.auto?.allowExceptions ?? []),
+            ],
+          },
+        }
+      : {}),
   }
 }
 

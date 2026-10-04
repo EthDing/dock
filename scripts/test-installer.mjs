@@ -24,14 +24,14 @@ const installed = spawnSync(join(home, 'bin', 'dock'), ['--version'], {
   encoding: 'utf8',
   env: environment,
 })
-if (installed.status !== 0 || installed.stdout.trim() !== '0.1.2')
+if (installed.status !== 0 || installed.stdout.trim() !== '0.2.0')
   throw new Error(`Installed Dock did not run: ${installed.stderr}`)
 
 await copyFile(join(release, 'dock-linux.tar.gz'), join(assets, 'dock-linux.tar.gz'))
 await writeFile(join(assets, 'dock-linux.tar.gz.sha256'), `${'0'.repeat(64)}  dock-linux.tar.gz\n`)
 const failed = spawnSync(join(root, 'install.sh'), [], { encoding: 'utf8', env: environment })
 if (failed.status === 0) throw new Error('Installer accepted an invalid checksum')
-if ((await readFile(join(home, 'share', 'dock', 'VERSION'), 'utf8')).trim() !== '0.1.2')
+if ((await readFile(join(home, 'share', 'dock', 'VERSION'), 'utf8')).trim() !== '0.2.0')
   throw new Error('Failed upgrade did not preserve the installed version')
 console.log('Installer E2E passed')
 

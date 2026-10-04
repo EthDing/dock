@@ -25,7 +25,7 @@
 提问时，面板会显示其来源。
 
 主 Agent 可以使用 `EnterPlanMode` 进入只读规划模式，再用 `ExitPlanMode` 提交当前计划。
-用户可以按 default 或 acceptEdits 模式批准，也可以提供反馈继续规划。子 Agent 不能切换
+用户可以按 default、acceptEdits 或 auto 模式批准，也可以提供反馈继续规划。子 Agent 不能切换
 主会话的 Plan mode。
 
 ## 工作任务

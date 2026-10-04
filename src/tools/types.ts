@@ -5,6 +5,8 @@ import type { JsonObject, JsonSchema } from '../model/types.js'
 import type { PermissionResult, ToolPermissionContext } from '../permissions/evaluate-permission.js'
 
 export type AgentToolResult = {
+  // Only trusted UI interactions may populate this, never model/tool output.
+  userMessage?: string
   content: string
   context?: SkillActivationContext
   isError?: boolean

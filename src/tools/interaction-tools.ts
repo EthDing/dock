@@ -74,7 +74,10 @@ export function createInteractionTools(options: {
           execution.signal,
         )
         if (response.type !== 'questions') throw new Error('Invalid question response')
-        return { content: JSON.stringify({ answers: response.answers }) }
+        return {
+          content: JSON.stringify({ answers: response.answers }),
+          userMessage: `User answered the questions: ${JSON.stringify(response.answers)}`,
+        }
       },
     },
   ]
@@ -130,7 +133,13 @@ export function createInteractionTools(options: {
         if (response.type !== 'plan') throw new Error('Invalid plan response')
         if (response.decision === 'approve_default') options.mode.set('default')
         else if (response.decision === 'approve_accept_edits') options.mode.set('acceptEdits')
+        else if (response.decision === 'approve_auto') options.mode.set('auto')
         return {
+          ...(approvedPlanMode(response.decision)
+            ? { userMessage: `User approved this plan for implementation:\n${plan}` }
+            : response.feedback
+              ? { userMessage: response.feedback }
+              : {}),
           content: JSON.stringify({
             plan,
             decision: response.decision,
@@ -170,5 +179,6 @@ function currentPlan(execution: ToolExecutionContext): string {
 export function approvedPlanMode(decision: string): PermissionMode | undefined {
   if (decision === 'approve_default') return 'default'
   if (decision === 'approve_accept_edits') return 'acceptEdits'
+  if (decision === 'approve_auto') return 'auto'
   return undefined
 }

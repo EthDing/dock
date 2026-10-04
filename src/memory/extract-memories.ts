@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import { runAgentLoop } from '../agent/run-agent-loop.js'
+import { runAgentLoop, type AgentLoopOptions } from '../agent/run-agent-loop.js'
 import { createUserMessage, type TranscriptMessage } from '../messages/create-message.js'
 import type { ModelAdapter } from '../model/types.js'
 import { isReadOnlyBashCommand } from '../tools/bash-tool.js'
@@ -7,6 +7,8 @@ import type { AgentTool, CanUseTool } from '../tools/types.js'
 import type { MemoryManager } from './memory-manager.js'
 
 type ExtractMemoriesOptions = {
+  canUseTool?: CanUseTool
+  getAgentIdentity?: AgentLoopOptions['getAgentIdentity']
   maxOutputTokens?: number
   memory: MemoryManager
   model: ModelAdapter
@@ -23,6 +25,8 @@ type ExtractionSnapshot = {
 }
 
 export class ExtractMemories {
+  readonly #canUseTool: CanUseTool | undefined
+  readonly #getAgentIdentity: AgentLoopOptions['getAgentIdentity']
   readonly #memory: MemoryManager
   readonly #model: ModelAdapter
   readonly #modelId: string
@@ -36,6 +40,8 @@ export class ExtractMemories {
   #running: Promise<void> | undefined
 
   constructor(options: ExtractMemoriesOptions) {
+    this.#canUseTool = options.canUseTool
+    this.#getAgentIdentity = options.getAgentIdentity
     this.#memory = options.memory
     this.#model = options.model
     this.#modelId = options.modelId
@@ -121,12 +127,18 @@ export class ExtractMemories {
         },
       ],
     })
+    extractionPrompt.isMeta = true
     const baseMessages = [...messages, extractionPrompt]
     // Keep the parent's model-visible prompt, history prefix, and tool schemas.
     // Enforcement changes through canUseTool so provider prompt caches can reuse
     // the shared prefix instead of seeing a different tool surface.
     const generator = runAgentLoop({
-      canUseTool: createMemoryCanUseTool(this.#memory),
+      canUseTool: async (tool, input, execution) => {
+        const boundary = await createMemoryCanUseTool(this.#memory)(tool, input, execution)
+        if (boundary.behavior === 'deny') return boundary
+        return (await this.#canUseTool?.(tool, input, execution)) ?? boundary
+      },
+      ...(this.#getAgentIdentity ? { getAgentIdentity: this.#getAgentIdentity } : {}),
       ...(this.#maxOutputTokens ? { maxOutputTokens: this.#maxOutputTokens } : {}),
       maxTurns: 5,
       messages: baseMessages,
