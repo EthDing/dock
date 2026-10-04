@@ -1,15 +1,10 @@
 # Dock 用户文档
 
-Dock 是运行在终端中的 coding agent。目前支持 Linux 和 WSL2，macOS 尚未完整验证，
-Windows 原生暂不支持。
+Dock 是运行在终端中的 coding agent，支持 Linux 和 WSL2。
 
-- [开始使用](getting-started.md)：安装、首次启动、更新和卸载。
-- [Headless 模式](headless.md)：一次性执行、输出格式和非交互权限行为。
-- [配置](configuration.md)：provider、model、权限、sandbox 和运行设置。
-- [工具](tools.md)：文件、命令、交互、任务、网络和子 Agent 工具。
-- [权限与 sandbox](permissions-and-sandbox.md)：审批规则与操作系统隔离。
-- [会话与上下文](sessions-and-context.md)：resume、branch、rewind、compact 和 Memory。
-- [任务与子 Agent](tasks-and-subagents.md)：工作任务、后台任务和 worktree。
-- [Skills](skills.md)：发现、激活和项目级 Skill。
-
-在 Dock 中输入 `/help` 可以查看当前版本真正提供的命令和快捷键。
+- [开始使用](getting-started.md)：安装、首次启动、配置。
+- [上下文与压缩](context.md)：项目指令如何加载，长对话如何压缩并恢复工作状态。
+- [Auto Memory](memory.md)：跨会话记住用户偏好和项目背景。
+- [Skills](skills.md)：按需加载的操作说明。
+- [子 Agent](subagents.md)：委派任务、后台运行和 worktree 隔离。
+- [权限与 sandbox](permissions-and-sandbox.md)：审批规则、权限模式、auto 模式和 Bash 隔离。
